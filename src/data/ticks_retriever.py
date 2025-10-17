@@ -1,4 +1,3 @@
-# python
 import yfinance as yf
 import pandas as pd
 import sqlite3
@@ -8,10 +7,83 @@ import re
 
 DB_PATH = "data/italian_stocks.db"
 
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from bs4 import BeautifulSoup
+import time
+
+
+# def get_italian_tickers(headless=True, delay=1.0):
+#     """
+#     Usa Selenium per navigare tra le pagine del listino A-Z di Borsa Italiana.
+#     Cicla su 'page' fino a quando la pagina corrente è uguale alla precedente.
+#     Restituisce una lista di ticker con suffisso '.MI'.
+#     """
+#     base_url = "https://www.borsaitaliana.it/borsa/azioni/listino-a-z.html?page={}&lang=it"
+#     tickers = set()
+#     prev_page_tickers = set()
+#
+#     # Configura Chrome headless
+#     options = Options()
+#     if headless:
+#         options.add_argument("--headless=new")
+#     options.add_argument("--no-sandbox")
+#     options.add_argument("--disable-dev-shm-usage")
+#
+#     driver = webdriver.Chrome(options=options)
+#
+#     page = 1
+#     while True:
+#         url = base_url.format(page)
+#         driver.get(url)
+#         time.sleep(delay)
+#
+#         html = driver.page_source
+#         soup = BeautifulSoup(html, "html.parser")
+#         table = soup.find("table")
+#         if not table:
+#             print(f"⚠️ Nessuna tabella trovata a pagina {page}")
+#             break
+#
+#         current_page_tickers = set()
+#         for tr in table.find_all("tr"):
+#             cols = tr.find_all("td")
+#             if not cols:
+#                 continue
+#             a = cols[0].find("a")
+#             if a and a.text.strip():
+#                 t = a.text.strip().upper()
+#                 if not t.endswith(".MI"):
+#                     t += ".MI"
+#                 current_page_tickers.add(t)
+#
+#         # Se la pagina è identica alla precedente, abbiamo finito
+#         if current_page_tickers == prev_page_tickers or not current_page_tickers:
+#             print(f"✅ Fine raggiunta a pagina {page}.")
+#             break
+#
+#         tickers.update(current_page_tickers)
+#         prev_page_tickers = current_page_tickers
+#         page += 1
+#
+#     driver.quit()
+#     return sorted(tickers)
+
+
+# if __name__ == "__main__":
+#     all_tickers = fetch_borsa_italiana_tickers_selenium()
+#     print(f"Totale tickers trovati: {len(all_tickers)}")
+#     print(all_tickers[:20])
+
 
 def get_italian_tickers():
+    prendile da qui https://live.euronext.com/en/markets/milan/equities/list
     return [
-        "ENEL.MI"
+        # "ENEL.MI"
+        # "1AXP.MI",
+        # "2ADBE.MI"
+        "BMPS.MI"
         # , "ENI.MI", "ISP.MI", "UCG.MI", "LUX.MI",
         # "STM.MI", "ATL.MI", "TEN.MI", "MONC.MI", "REC.MI"
     ]
@@ -27,7 +99,6 @@ def ensure_db():
     """Crea la cartella del DB se non esiste. Restituisce True se il DB è nuovo."""
     is_new = not os.path.exists(DB_PATH)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    # apri e chiudi per creare il file se mancante
     conn = sqlite3.connect(DB_PATH)
     conn.close()
     return is_new
@@ -61,15 +132,14 @@ def get_last_timestamp(ticker: str):
         cursor.execute(f"SELECT MAX(datetime) FROM {table}")
         result = cursor.fetchone()[0]
     except sqlite3.OperationalError:
-        # tabella inesistente
         result = None
     conn.close()
-    if result:
-        return datetime.datetime.fromisoformat(result)
-    return None
-
-
-import pandas as pd
+    if not result:
+        return None
+    ts = pd.to_datetime(result, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.to_pydatetime()
 
 
 def normalize_yf_df(df, default_ticker=None):
@@ -83,8 +153,6 @@ def normalize_yf_df(df, default_ticker=None):
     - colonne flat con suffissi (es. 'Open_ENEL.MI' o 'ENI.MI_Open')
     """
     df = df.copy()
-
-    # Assicura che l'indice sia datetime
     if not isinstance(df.index, pd.DatetimeIndex):
         try:
             df.index = pd.to_datetime(df.index)
@@ -95,17 +163,12 @@ def normalize_yf_df(df, default_ticker=None):
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = set(df.columns.get_level_values(0))
         fields_set = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
-
-        # Struttura: (field, ticker)
         if len(fields_set & lvl0) > 0:
             long = df.stack(level=1).reset_index()
             long = long.rename(columns={"level_0": "datetime", "level_1": "ticker"})
-        # Struttura: (ticker, field)
         else:
             long = df.stack(level=0).reset_index()
             long = long.rename(columns={"level_0": "datetime", "level_1": "ticker"})
-
-        # Rinomina colonne in formato uniforme
         col_map = {
             "Adj Close": "adj_close",
             "Datetime": "datetime",
@@ -116,12 +179,9 @@ def normalize_yf_df(df, default_ticker=None):
             "Volume": "volume",
         }
         long = long.rename(columns={k: v for k, v in col_map.items() if k in long.columns})
-
-        # Mantieni solo colonne rilevanti
         for c in ["open", "high", "low", "close", "volume"]:
             if c not in long.columns:
                 long[c] = None
-
         return long[["datetime", "open", "high", "low", "close", "volume"]]
 
     # === Caso 2: colonne single-level ===
@@ -132,11 +192,8 @@ def normalize_yf_df(df, default_ticker=None):
     cols = df2.columns.tolist()
     fields_set = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
 
-    # Caso: singolo ticker (colonne semplici)
     if any(c in fields_set for c in cols):
-        ticker = default_ticker or "SINGLE"
         out = df2[["datetime"]].copy()
-        # out["ticker"] = ticker
         out["open"] = df2.get("Open")
         out["high"] = df2.get("High")
         out["low"] = df2.get("Low")
@@ -165,7 +222,6 @@ def normalize_yf_df(df, default_ticker=None):
         for t, fmap in suf_map.items():
             out_rows.append({
                 "datetime": row["datetime"],
-                # "ticker": t,
                 "open": row.get(fmap.get("Open")),
                 "high": row.get(fmap.get("High")),
                 "low": row.get(fmap.get("Low")),
@@ -178,7 +234,6 @@ def normalize_yf_df(df, default_ticker=None):
 
 
 def download_data(ticker: str, start: datetime.datetime, end: datetime.datetime):
-    """Scarica i dati a 5 minuti per il ticker nel range indicato."""
     print(f"📥 Scarico dati per {ticker} da {start} a {end}...")
     df = yf.download(
         ticker,
@@ -188,28 +243,26 @@ def download_data(ticker: str, start: datetime.datetime, end: datetime.datetime)
         progress=False
     )
 
-
     if df.empty:
         print(f"⚠️ Nessun dato per {ticker}")
         return None
 
     df_clean = normalize_yf_df(df, default_ticker=ticker)
 
-    # assicurarsi che 'datetime' sia datetime e poi stringa ISO (compatibile con sqlite)
     try:
         df_clean["datetime"] = pd.to_datetime(df_clean["datetime"], errors="coerce")
     except Exception:
         pass
+
+    # convert to ISO strings (or None)
     df_clean["datetime"] = df_clean["datetime"].apply(
-        lambda x: x.isoformat() if (hasattr(x, "isoformat")) and pd.notna(x) else str(x)
+        lambda x: x.isoformat() if (hasattr(x, "isoformat")) and pd.notna(x) else None
     )
 
     return df_clean[["datetime", "open", "high", "low", "close", "volume"]]
 
 
 def save_to_db(df: pd.DataFrame, ticker: str):
-    """Salva i dati nella tabella specifica del ticker usando INSERT OR IGNORE.
-    Arrotonda i valori float a 3 decimali."""
     if df is None or df.empty:
         return
     create_table_for_ticker(ticker)
@@ -218,9 +271,16 @@ def save_to_db(df: pd.DataFrame, ticker: str):
     def to_iso(val):
         if pd.isna(val):
             return None
+        if isinstance(val, str):
+            return val
         if isinstance(val, (pd.Timestamp, datetime.datetime)):
             return val.isoformat()
-        return str(val)
+        try:
+            # last resort: attempt to parse then isoformat
+            parsed = pd.to_datetime(val, errors="coerce")
+            return parsed.isoformat() if pd.notna(parsed) else None
+        except Exception:
+            return None
 
     def to_float3(v):
         if pd.isna(v) or v is None:
@@ -233,6 +293,9 @@ def save_to_db(df: pd.DataFrame, ticker: str):
     rows = []
     for _, row in df.iterrows():
         dt = to_iso(row.get("datetime"))
+        if not dt:
+            # skip rows without valid datetime (primary key)
+            continue
         open_v = to_float3(row.get("open"))
         high_v = to_float3(row.get("high"))
         low_v = to_float3(row.get("low"))
@@ -240,14 +303,8 @@ def save_to_db(df: pd.DataFrame, ticker: str):
         vol = None if pd.isna(row.get("volume")) else int(row.get("volume"))
         rows.append((dt, open_v, high_v, low_v, close_v, vol))
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.executemany(
-        f"INSERT OR IGNORE INTO {table} (datetime, open, high, low, close, volume) VALUES (?,?,?,?,?,?)",
-        rows
-    )
-    conn.commit()
-    conn.close()
+    if not rows:
+        return
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -260,17 +317,14 @@ def save_to_db(df: pd.DataFrame, ticker: str):
 
 
 def update_ticker_data(ticker: str, is_first_run: bool):
-    """Aggiorna o inizializza i dati per un singolo ticker (tabella separata)."""
     end = datetime.datetime.now()
     start = end - datetime.timedelta(days=59)  # ultimi 59 giorni
 
     if not is_first_run:
         last_ts = get_last_timestamp(ticker)
         if not last_ts:
-            print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi 59 giorni mesi completi.")
-            pass
+            print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi 59 giorni completi.")
         elif last_ts and last_ts < end - datetime.timedelta(minutes=5):
-            # iniziare da un minuto dopo l'ultimo timestamp per evitare duplicati
             start = last_ts + datetime.timedelta(minutes=5)
         else:
             print(f"✅ {ticker}: dati già aggiornati")
