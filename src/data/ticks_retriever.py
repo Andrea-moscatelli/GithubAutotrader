@@ -5,7 +5,7 @@ import datetime
 import os
 import re
 
-DB_PATH = "data/italian_stocks.db"
+DB_PATH = "data/db/italian_stocks.db"
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -77,16 +77,90 @@ import time
 #     print(all_tickers[:20])
 
 
-def get_italian_tickers():
-    prendile da qui https://live.euronext.com/en/markets/milan/equities/list
-    return [
-        # "ENEL.MI"
-        # "1AXP.MI",
-        # "2ADBE.MI"
-        "BMPS.MI"
-        # , "ENI.MI", "ISP.MI", "UCG.MI", "LUX.MI",
-        # "STM.MI", "ATL.MI", "TEN.MI", "MONC.MI", "REC.MI"
-    ]
+# def get_italian_tickers():
+#     prendile da qui https://live.euronext.com/en/markets/milan/equities/list
+#     return [
+#         # "ENEL.MI"
+#         # "1AXP.MI",
+#         # "2ADBE.MI"
+#         "BMPS.MI"
+#         # , "ENI.MI", "ISP.MI", "UCG.MI", "LUX.MI",
+#         # "STM.MI", "ATL.MI", "TEN.MI", "MONC.MI", "REC.MI"
+#     ]
+
+from playwright.sync_api import sync_playwright
+BASE_URL = "https://live.euronext.com/en/markets/milan/equities/list?page={}"
+import os
+
+def scrape_milan_stocks(output_folder="."):
+    output_dir = os.path.join(output_folder, "db")
+    os.makedirs(output_dir, exist_ok=True)
+    output_csv = os.path.join(output_dir, "milan_stocks.csv")
+
+    all_tickers = set()
+    prev_tickers = set()
+    data = []
+    page_num = 0
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        while True:
+            url = BASE_URL.format(page_num)
+            print(f"Caricamento pagina: {url}")
+            page.goto(url, wait_until="networkidle", timeout=20000)
+            # page.wait_for_selector("table#stocks-data-table-es")
+            page.wait_for_selector("table#stocks-data-table-es", state="attached")
+            rows = page.query_selector_all("table#stocks-data-table-es > tbody > tr")
+
+            current_tickers = set()
+            for r in rows:
+                name = r.query_selector(".stocks-name a")
+                isin = r.query_selector(".stocks-isin")
+                symbol = r.query_selector(".stocks-symbol")
+                market = r.query_selector(".stocks-market div")
+                last_price = r.query_selector(".stocks-lastPrice .pd_last_price_es")
+                pct_change = r.query_selector(".stocks-precentDayChange .pd_percent span")
+                last_trade_time = r.query_selector(".stocks-lastTradeTime div")
+
+                ticker = symbol.inner_text().strip() if symbol else None
+                if ticker:
+                    current_tickers.add(ticker)
+                    data.append({
+                        "name": name.inner_text().strip() if name else None,
+                        "isin": isin.inner_text().strip() if isin else None,
+                        "symbol": ticker,
+                        "market": market.inner_text().strip() if market else None,
+                        "last_price": last_price.inner_text().strip() if last_price else None,
+                        "percent_change": pct_change.inner_text().strip() if pct_change else None,
+                        "last_trade_time": last_trade_time.inner_text().strip() if last_trade_time else None
+                    })
+                    print(f"Trovato titolo: {ticker} - {data[-1]['name']} - {data[-1]['isin']}")
+
+            # Se non ci sono nuovi ticker, termina
+            if not current_tickers or current_tickers == prev_tickers:
+                print(f"✅ Fine raggiunta a pagina {page_num}.")
+                break
+
+            all_tickers.update(current_tickers)
+            prev_tickers = current_tickers
+            page_num += 1
+
+        browser.close()
+
+    import pandas as pd
+    df = pd.DataFrame(data)
+    df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+    print(f"✅ Trovati {len(df)} titoli. Salvato in '{output_csv}'.")
+
+    tickers = []
+    for sym in df["symbol"].dropna().unique():
+        if not sym.endswith(".MI"):
+            sym += ".MI"
+        tickers.append(sym)
+    return tickers
+
 
 
 def table_name_for(ticker: str) -> str:
@@ -335,9 +409,15 @@ def update_ticker_data(ticker: str, is_first_run: bool):
     print(f"✅ {ticker}: processate {len(df) if df is not None else 0} righe.")
 
 
-def main():
+def main(output_folder="."):
     is_first_run = ensure_db()
-    tickers = get_italian_tickers()
+
+    tickers = scrape_milan_stocks(output_folder)
+    if not tickers:
+        print("⚠️ Nessun dato trovato.")
+        return
+
+    # tickers = get_italian_tickers()
 
     print("🚀 Avvio aggiornamento dati azioni italiane")
     if is_first_run:

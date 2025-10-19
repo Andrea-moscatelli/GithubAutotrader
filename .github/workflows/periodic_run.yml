@@ -1,12 +1,12 @@
 name: Automated trader
 
 on:
-  schedule:
-#      - cron: "0 0 * * *"   # ogni 24 ore
-  #    - cron: "0 8 * * *"   # ogni giorno alle 08:00 UTC
-  #    - cron: "0 12 * * *"  # ogni giorno alle 12:00 UTC
-  #    - cron: "0 16 * * *"  # ogni giorno alle 16:00 UTC
-  workflow_dispatch:       # per avviarlo manualmente
+#  schedule:
+#    - cron: "0 0 * * *"   # ogni giorno alle 00:00 UTC
+    # - cron: "0 8 * * *"   # ogni giorno alle 08:00 UTC
+    # - cron: "0 12 * * *"  # ogni giorno alle 12:00 UTC
+    # - cron: "0 16 * * *"  # ogni giorno alle 16:00 UTC
+  workflow_dispatch:
 
 jobs:
   update:
@@ -26,6 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Installa Playwright browsers
+        run: playwright install
+
       - name: Run script
         run: python src/data/ticks_retriever.py
 
@@ -34,5 +37,6 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add data/db/italian_stocks.db
+          git add data/db/milan_stocks.csv
           git commit -m "Aggiornamento dati azioni italiane" || echo "Nessun cambiamento"
           git push
