@@ -1,3 +1,5 @@
+import shutil
+
 import yfinance as yf
 import sqlite3
 import datetime
@@ -15,6 +17,7 @@ DAYS_TO_RETRIEVE = 59
 
 NOT_WORKING_TICKERS = f"not_found_tickers_for_interval_{TICKS_INTERVAL}.txt"
 
+
 def load_not_found_tickers(db_folder):
     try:
         with open(os.path.join(db_folder, NOT_WORKING_TICKERS), "r") as f:
@@ -22,11 +25,13 @@ def load_not_found_tickers(db_folder):
     except FileNotFoundError:
         return set()
 
+
 # funzione per salvare il set su file
 def save_not_found_tickers(db_folder, tickers_set):
     with open(os.path.join(db_folder, NOT_WORKING_TICKERS), "w") as f:
         for ticker in tickers_set:
             f.write(f"{ticker}\n")
+
 
 # def get_italian_tickers(headless=True, delay=1.0):
 #     """
@@ -171,15 +176,21 @@ def scrape_milan_stocks(db_folder="db"):
         tickers.append(sym)
     return tickers
 
+
 def table_name_for(ticker: str) -> str:
     """Genera un nome tabella sicuro da un ticker (es: ENEL.MI -> t_ENEL_MI)."""
     safe = re.sub(r'[^0-9A-Za-z_]', '_', ticker)
     return f"t_{safe}"
 
-def ensure_db():
+
+def ensure_db(db_folder):
     """Crea la cartella del DB se non esiste. Restituisce True se il DB è nuovo."""
-    #rimuovi il file DB_PATH
-    os.remove(DB_PATH)
+    # rimuovi il file DB_PATH
+    if os.environ.get("MARKET", "FALSE") == "TRUE" and os.path.exists(db_folder):
+        shutil.rmtree(db_folder)
+        os.makedirs(db_folder)
+        print("!!!Dati app resettati!!!")
+
 
     is_new = not os.path.exists(DB_PATH)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -425,7 +436,7 @@ def upsert_ticker_data(ticker: str, is_first_run: bool):
 
 
 def main(db_folder="db"):
-    is_first_run = ensure_db()
+    is_first_run = ensure_db(db_folder)
 
     tickers = scrape_milan_stocks(db_folder)
     tickers = tickers[:20]

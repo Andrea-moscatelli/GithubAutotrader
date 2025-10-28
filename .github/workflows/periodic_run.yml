@@ -7,6 +7,11 @@ on:
     # - cron: "0 12 * * *"  # ogni giorno alle 12:00 UTC
     # - cron: "0 16 * * *"  # ogni giorno alle 16:00 UTC
   workflow_dispatch:
+    inputs:
+      reset:
+        description: 'Set it to TRUE if you want to reinitialize the app data'
+        required: true
+        default: 'FALSE'
 
 jobs:
   update:
@@ -31,6 +36,8 @@ jobs:
 
       - name: Run script
         run: python src/data/ticks_retriever.py
+        env:
+          RESET: ${{ github.event.inputs.reset }}
 
       - name: Commit updated database
         run: |
