@@ -12,6 +12,8 @@ on:
         description: 'Set it to TRUE if you want to reinitialize the app data'
         required: true
         default: 'FALSE'
+permissions:
+  contents: write  # necessario per push
 
 jobs:
   update:
