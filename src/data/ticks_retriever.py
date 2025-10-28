@@ -1,18 +1,32 @@
 import yfinance as yf
-import pandas as pd
 import sqlite3
 import datetime
-import os
 import re
 
-DB_PATH = "data/db/italian_stocks.db"
+import os
+import pandas as pd
+from playwright.sync_api import sync_playwright
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from bs4 import BeautifulSoup
-import time
+DB_PATH = "db/italian_stocks.db"
+BASE_URL = "https://live.euronext.com/en/markets/milan/equities/list?page={}"
+MILAN_TICKERS_FILE_NAME = "milan_stocks.csv"
+TICKS_INTERVAL = "5m"
+DAYS_TO_RETRIEVE = 59
 
+NOT_WORKING_TICKERS = f"not_found_tickers_for_interval_{TICKS_INTERVAL}.txt"
+
+def load_not_found_tickers(db_folder):
+    try:
+        with open(os.path.join(db_folder, NOT_WORKING_TICKERS), "r") as f:
+            return set(line.strip() for line in f if line.strip())
+    except FileNotFoundError:
+        return set()
+
+# funzione per salvare il set su file
+def save_not_found_tickers(db_folder, tickers_set):
+    with open(os.path.join(db_folder, NOT_WORKING_TICKERS), "w") as f:
+        for ticker in tickers_set:
+            f.write(f"{ticker}\n")
 
 # def get_italian_tickers(headless=True, delay=1.0):
 #     """
@@ -88,14 +102,10 @@ import time
 #         # "STM.MI", "ATL.MI", "TEN.MI", "MONC.MI", "REC.MI"
 #     ]
 
-from playwright.sync_api import sync_playwright
-BASE_URL = "https://live.euronext.com/en/markets/milan/equities/list?page={}"
-import os
 
-def scrape_milan_stocks(output_folder="."):
-    output_dir = os.path.join(output_folder, "db")
-    os.makedirs(output_dir, exist_ok=True)
-    output_csv = os.path.join(output_dir, "milan_stocks.csv")
+def scrape_milan_stocks(db_folder="db"):
+    os.makedirs(db_folder, exist_ok=True)
+    output_csv = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
 
     all_tickers = set()
     prev_tickers = set()
@@ -146,10 +156,10 @@ def scrape_milan_stocks(output_folder="."):
             all_tickers.update(current_tickers)
             prev_tickers = current_tickers
             page_num += 1
+            break
 
         browser.close()
 
-    import pandas as pd
     df = pd.DataFrame(data)
     df.to_csv(output_csv, index=False, encoding="utf-8-sig")
     print(f"✅ Trovati {len(df)} titoli. Salvato in '{output_csv}'.")
@@ -161,16 +171,16 @@ def scrape_milan_stocks(output_folder="."):
         tickers.append(sym)
     return tickers
 
-
-
 def table_name_for(ticker: str) -> str:
     """Genera un nome tabella sicuro da un ticker (es: ENEL.MI -> t_ENEL_MI)."""
     safe = re.sub(r'[^0-9A-Za-z_]', '_', ticker)
     return f"t_{safe}"
 
-
 def ensure_db():
     """Crea la cartella del DB se non esiste. Restituisce True se il DB è nuovo."""
+    #rimuovi il file DB_PATH
+    os.remove(DB_PATH)
+
     is_new = not os.path.exists(DB_PATH)
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -238,7 +248,7 @@ def normalize_yf_df(df, default_ticker=None):
         lvl0 = set(df.columns.get_level_values(0))
         fields_set = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
         if len(fields_set & lvl0) > 0:
-            long = df.stack(level=1).reset_index()
+            long = df.stack(level=1, future_stack=True).reset_index()
             long = long.rename(columns={"level_0": "datetime", "level_1": "ticker"})
         else:
             long = df.stack(level=0).reset_index()
@@ -311,10 +321,11 @@ def download_data(ticker: str, start: datetime.datetime, end: datetime.datetime)
     print(f"📥 Scarico dati per {ticker} da {start} a {end}...")
     df = yf.download(
         ticker,
-        interval="5m",
+        interval=TICKS_INTERVAL,
         start=start,
         end=end,
-        progress=False
+        progress=False,
+        auto_adjust=False
     )
 
     if df.empty:
@@ -390,9 +401,9 @@ def save_to_db(df: pd.DataFrame, ticker: str):
     conn.close()
 
 
-def update_ticker_data(ticker: str, is_first_run: bool):
+def upsert_ticker_data(ticker: str, is_first_run: bool):
     end = datetime.datetime.now()
-    start = end - datetime.timedelta(days=59)  # ultimi 59 giorni
+    start = end - datetime.timedelta(days=DAYS_TO_RETRIEVE)
 
     if not is_first_run:
         last_ts = get_last_timestamp(ticker)
@@ -405,14 +416,19 @@ def update_ticker_data(ticker: str, is_first_run: bool):
             return
 
     df = download_data(ticker, start, end)
+    if df is None or df.empty:
+        return False
+
     save_to_db(df, ticker)
     print(f"✅ {ticker}: processate {len(df) if df is not None else 0} righe.")
+    return True
 
 
-def main(output_folder="."):
+def main(db_folder="db"):
     is_first_run = ensure_db()
 
-    tickers = scrape_milan_stocks(output_folder)
+    tickers = scrape_milan_stocks(db_folder)
+    tickers = tickers[:20]
     if not tickers:
         print("⚠️ Nessun dato trovato.")
         return
@@ -425,11 +441,15 @@ def main(output_folder="."):
     else:
         print("📈 Database esistente: aggiorno solo nuovi dati...")
 
-    for t in tickers:
+    not_found_tickers = load_not_found_tickers(db_folder)
+    for t in (t for t in tickers if t not in not_found_tickers):
         try:
-            update_ticker_data(t, is_first_run)
+            if not upsert_ticker_data(t, is_first_run):
+                not_found_tickers.add(t)
         except Exception as e:
             print(f"❌ Errore con {t}: {e}")
+
+    save_not_found_tickers(db_folder, not_found_tickers)
 
     print("🏁 Aggiornamento completato.")
 

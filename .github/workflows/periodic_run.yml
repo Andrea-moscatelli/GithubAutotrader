@@ -36,7 +36,6 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add data/db/italian_stocks.db
-          git add data/db/milan_stocks.csv
+          git add src/data/db/*
           git commit -m "Aggiornamento dati azioni italiane" || echo "Nessun cambiamento"
           git push
