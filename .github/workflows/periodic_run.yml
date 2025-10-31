@@ -41,7 +41,7 @@ jobs:
         run: playwright install
 
       - name: Run script
-        run: python src/data/ticks_retriever.py
+        run: python src/main.py
         env:
           RESET: ${{ github.event.inputs.reset }}
 

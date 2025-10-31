@@ -110,7 +110,7 @@ def save_not_found_tickers(db_folder, tickers_set):
 #     ]
 
 
-def scrape_milan_stocks(db_folder="db"):
+def scrape_milan_stocks(db_folder):
     os.makedirs(db_folder, exist_ok=True)
     output_csv = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
 
@@ -201,7 +201,7 @@ def ensure_db(db_folder):
     return is_new
 
 
-def create_table_for_ticker(ticker: str, db_folder="db"):
+def create_table_for_ticker(ticker: str, db_folder):
     """Crea la tabella specifica per il ticker se non esiste."""
     table = table_name_for(ticker)
     db_file_path = os.path.join(db_folder, DB_NAME)
@@ -221,7 +221,7 @@ def create_table_for_ticker(ticker: str, db_folder="db"):
     conn.close()
 
 
-def get_last_timestamp(ticker: str, db_folder="db"):
+def get_last_timestamp(ticker: str, db_folder):
     """Restituisce l'ultimo timestamp disponibile nella tabella del ticker o None."""
     table = table_name_for(ticker)
     db_file_path = os.path.join(db_folder, DB_NAME)
@@ -362,11 +362,11 @@ def download_data(ticker: str, start: datetime.datetime, end: datetime.datetime)
     return df_clean[["datetime", "open", "high", "low", "close", "volume"]]
 
 
-def save_to_db(df: pd.DataFrame, ticker: str, db_folder="db"):
+def save_to_db(df: pd.DataFrame, ticker: str, db_folder):
 
     if df is None or df.empty:
         return
-    create_table_for_ticker(ticker)
+    create_table_for_ticker(ticker, db_folder)
     table = table_name_for(ticker)
 
     def to_iso(val):
@@ -418,12 +418,12 @@ def save_to_db(df: pd.DataFrame, ticker: str, db_folder="db"):
     conn.close()
 
 
-def upsert_ticker_data(ticker: str, is_first_run: bool):
+def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder):
     end = datetime.datetime.now()
     start = end - datetime.timedelta(days=DAYS_TO_RETRIEVE)
 
     if not is_first_run:
-        last_ts = get_last_timestamp(ticker)
+        last_ts = get_last_timestamp(ticker, db_folder)
         if not last_ts:
             print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi 59 giorni completi.")
         elif last_ts and last_ts < end - datetime.timedelta(minutes=5):
@@ -436,12 +436,12 @@ def upsert_ticker_data(ticker: str, is_first_run: bool):
     if df is None or df.empty:
         return False
 
-    save_to_db(df, ticker)
+    save_to_db(df, ticker, db_folder)
     print(f"✅ {ticker}: processate {len(df) if df is not None else 0} righe.")
     return True
 
 
-def main(db_folder="db"):
+def main(db_folder):
     is_first_run = ensure_db(db_folder)
 
     tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
@@ -466,7 +466,7 @@ def main(db_folder="db"):
     not_found_tickers = load_not_found_tickers(db_folder)
     for t in (t for t in tickers if t not in not_found_tickers):
         try:
-            if not upsert_ticker_data(t, is_first_run):
+            if not upsert_ticker_data(t, is_first_run, db_folder):
                 not_found_tickers.add(t)
         except Exception as e:
             print(f"❌ Errore con {t}: {e}")
@@ -491,4 +491,4 @@ def save_tickers_file(db_folder: str, tickers: list):
 
 
 if __name__ == "__main__":
-    main()
+    main("db")
