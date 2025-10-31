@@ -28,6 +28,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install system dependencies for Playwright
+        run: |
+          sudo npx playwright install-deps
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
