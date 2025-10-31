@@ -162,7 +162,6 @@ def scrape_milan_stocks(db_folder):
             all_tickers.update(current_tickers)
             prev_tickers = current_tickers
             page_num += 1
-            break
 
         browser.close()
 
