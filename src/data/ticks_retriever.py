@@ -2,13 +2,12 @@ import shutil
 
 import yfinance as yf
 import sqlite3
-import datetime
+from datetime import datetime, timezone, date, timedelta
 import re
 
 import os
 import pandas as pd
 from playwright.sync_api import sync_playwright
-from datetime import date
 
 # DB_PATH = "db/italian_stocks.db"
 DB_NAME = "italian_stocks.db"
@@ -201,7 +200,7 @@ def ensure_db(db_folder):
     return is_new
 
 
-def create_table_for_ticker(ticker: str, db_folder):
+def create_table_for_ticker_if_not_exists(ticker: str, db_folder):
     """Crea la tabella specifica per il ticker se non esiste."""
     table = table_name_for(ticker)
     db_file_path = os.path.join(db_folder, DB_NAME)
@@ -332,7 +331,7 @@ def normalize_yf_df(df, default_ticker=None):
     return out[["datetime", "open", "high", "low", "close", "volume"]]
 
 
-def download_data(ticker: str, start: datetime.datetime, end: datetime.datetime):
+def download_data(ticker: str, start: datetime, end: datetime):
     print(f"📥 Scarico dati per {ticker} da {start} a {end}...")
     df = yf.download(
         ticker,
@@ -362,11 +361,11 @@ def download_data(ticker: str, start: datetime.datetime, end: datetime.datetime)
     return df_clean[["datetime", "open", "high", "low", "close", "volume"]]
 
 
-def save_to_db(df: pd.DataFrame, ticker: str, db_folder):
+def add_to_db(df: pd.DataFrame, ticker: str, db_folder):
 
     if df is None or df.empty:
         return
-    create_table_for_ticker(ticker, db_folder)
+    create_table_for_ticker_if_not_exists(ticker, db_folder)
     table = table_name_for(ticker)
 
     def to_iso(val):
@@ -374,7 +373,7 @@ def save_to_db(df: pd.DataFrame, ticker: str, db_folder):
             return None
         if isinstance(val, str):
             return val
-        if isinstance(val, (pd.Timestamp, datetime.datetime)):
+        if isinstance(val, (pd.Timestamp, datetime)):
             return val.isoformat()
         try:
             # last resort: attempt to parse then isoformat
@@ -419,24 +418,25 @@ def save_to_db(df: pd.DataFrame, ticker: str, db_folder):
 
 
 def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder):
-    end = datetime.datetime.now()
-    start = end - datetime.timedelta(days=DAYS_TO_RETRIEVE)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=DAYS_TO_RETRIEVE)
 
+    last_ts = None
     if not is_first_run:
         last_ts = get_last_timestamp(ticker, db_folder)
         if not last_ts:
             print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi 59 giorni completi.")
-        elif last_ts and last_ts < end - datetime.timedelta(minutes=5):
-            start = last_ts + datetime.timedelta(minutes=5)
+        elif last_ts and last_ts < end - timedelta(minutes=5):
+            start = last_ts + timedelta(minutes=5)
         else:
             print(f"✅ {ticker}: dati già aggiornati")
             return
 
     df = download_data(ticker, start, end)
-    if df is None or df.empty:
+    if (df is None or df.empty) and not last_ts:
         return False
 
-    save_to_db(df, ticker, db_folder)
+    add_to_db(df, ticker, db_folder)
     print(f"✅ {ticker}: processate {len(df) if df is not None else 0} righe.")
     return True
 
