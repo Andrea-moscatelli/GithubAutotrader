@@ -8,10 +8,12 @@ import re
 import os
 import pandas as pd
 from playwright.sync_api import sync_playwright
+from datetime import date
 
-DB_PATH = "db/italian_stocks.db"
+# DB_PATH = "db/italian_stocks.db"
+DB_NAME = "italian_stocks.db"
+MILAN_TICKERS_FILE_NAME = "milan_tickers.csv"
 BASE_URL = "https://live.euronext.com/en/markets/milan/equities/list?page={}"
-MILAN_TICKERS_FILE_NAME = "milan_stocks.csv"
 TICKS_INTERVAL = "5m"
 DAYS_TO_RETRIEVE = 59
 
@@ -191,18 +193,19 @@ def ensure_db(db_folder):
         os.makedirs(db_folder)
         print("!!!Dati app resettati!!!")
 
-
-    is_new = not os.path.exists(DB_PATH)
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    db_file_path = os.path.join(db_folder, DB_NAME)
+    is_new = not os.path.exists(db_file_path)
+    os.makedirs(os.path.dirname(db_file_path), exist_ok=True)
+    conn = sqlite3.connect(db_file_path)
     conn.close()
     return is_new
 
 
-def create_table_for_ticker(ticker: str):
+def create_table_for_ticker(ticker: str, db_folder="db"):
     """Crea la tabella specifica per il ticker se non esiste."""
     table = table_name_for(ticker)
-    conn = sqlite3.connect(DB_PATH)
+    db_file_path = os.path.join(db_folder, DB_NAME)
+    conn = sqlite3.connect(db_file_path)
     cursor = conn.cursor()
     cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS {table} (
@@ -218,10 +221,11 @@ def create_table_for_ticker(ticker: str):
     conn.close()
 
 
-def get_last_timestamp(ticker: str):
+def get_last_timestamp(ticker: str, db_folder="db"):
     """Restituisce l'ultimo timestamp disponibile nella tabella del ticker o None."""
     table = table_name_for(ticker)
-    conn = sqlite3.connect(DB_PATH)
+    db_file_path = os.path.join(db_folder, DB_NAME)
+    conn = sqlite3.connect(db_file_path)
     cursor = conn.cursor()
     try:
         cursor.execute(f"SELECT MAX(datetime) FROM {table}")
@@ -358,7 +362,8 @@ def download_data(ticker: str, start: datetime.datetime, end: datetime.datetime)
     return df_clean[["datetime", "open", "high", "low", "close", "volume"]]
 
 
-def save_to_db(df: pd.DataFrame, ticker: str):
+def save_to_db(df: pd.DataFrame, ticker: str, db_folder="db"):
+
     if df is None or df.empty:
         return
     create_table_for_ticker(ticker)
@@ -402,7 +407,8 @@ def save_to_db(df: pd.DataFrame, ticker: str):
     if not rows:
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    db_file_path = os.path.join(db_folder, DB_NAME)
+    conn = sqlite3.connect(db_file_path)
     cursor = conn.cursor()
     cursor.executemany(
         f"INSERT OR IGNORE INTO {table} (datetime, open, high, low, close, volume) VALUES (?,?,?,?,?,?)",
@@ -438,8 +444,13 @@ def upsert_ticker_data(ticker: str, is_first_run: bool):
 def main(db_folder="db"):
     is_first_run = ensure_db(db_folder)
 
-    tickers = scrape_milan_stocks(db_folder)
-    tickers = tickers[:20]
+    tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
+    if date.today().day == 1 or not os.path.exists(tickers_file): # primo del mese, riscarica i tickers
+        tickers = scrape_milan_stocks(db_folder)
+        tickers = tickers[:20]
+        save_tickers_file(db_folder, tickers)
+    else:
+        tickers = load_tickers_file(db_folder)
     if not tickers:
         print("⚠️ Nessun dato trovato.")
         return
@@ -463,6 +474,20 @@ def main(db_folder="db"):
     save_not_found_tickers(db_folder, not_found_tickers)
 
     print("🏁 Aggiornamento completato.")
+
+
+def load_tickers_file(db_folder: str) -> list:
+    tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
+    df_tickers = pd.read_csv(tickers_file)
+    tickers = df_tickers["symbol"].dropna().unique().tolist()
+    return tickers
+
+
+def save_tickers_file(db_folder: str, tickers: list):
+    tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
+    df_tickers = pd.DataFrame({"symbol": tickers})
+    df_tickers.to_csv(tickers_file, index=False, encoding="utf-8-sig")
+    print(f"✅ Salvati {len(tickers)} tickers in '{tickers_file}'")
 
 
 if __name__ == "__main__":
