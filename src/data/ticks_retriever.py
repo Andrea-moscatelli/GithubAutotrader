@@ -433,7 +433,7 @@ def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder):
             return
 
     df = download_data(ticker, start, end)
-    if (df is None or df.empty) and not last_ts:
+    if (df is None or df.empty) and not last_ts: #TODO oppure il last_ts è più vecchio di X giorni? i ticks che hanno come ultimo valore un prezzo di un anno fa devo smettere di cercare di reperirlo
         return False
 
     add_to_db(df, ticker, db_folder)
@@ -447,7 +447,7 @@ def main(db_folder):
     tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
     if date.today().day == 1 or not os.path.exists(tickers_file): # primo del mese, riscarica i tickers
         tickers = scrape_milan_stocks(db_folder)
-        tickers = tickers[:20]
+        # tickers = tickers[:20]
         save_tickers_file(db_folder, tickers)
     else:
         tickers = load_tickers_file(db_folder)
