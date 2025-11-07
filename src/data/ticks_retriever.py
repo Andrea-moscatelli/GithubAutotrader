@@ -186,7 +186,7 @@ def table_name_for(ticker: str) -> str:
 def ensure_db(db_folder):
     """Crea la cartella del DB se non esiste. Restituisce True se il DB è nuovo."""
     # rimuovi il file DB_PATH
-    if os.environ.get("MARKET", "FALSE") == "TRUE" and os.path.exists(db_folder):
+    if os.environ.get("RESET", "FALSE") == "TRUE" and os.path.exists(db_folder):
         shutil.rmtree(db_folder)
         os.makedirs(db_folder)
         print("!!!Dati app resettati!!!")
