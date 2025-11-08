@@ -400,21 +400,23 @@ def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder, day_to_retrie
 def main(db_folder: str):
     is_first_run = ensure_db(db_folder)
 
+    tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
+    if date.today().day == 1 or not os.path.exists(tickers_file):
+        tickers = scrape_milan_stocks(db_folder)
+        save_tickers_file(db_folder, tickers)
+    else:
+        tickers = load_tickers_file(db_folder)
+
+    if not tickers:
+        print("⚠️ Nessun dato trovato.")
+        return
+
     for interval, day_to_retrieve in INTERVALS_CONFIG.items():
         print(f"\n🔹 Avvio aggiornamento dati per intervallo {interval} ({day_to_retrieve} giorni)...")
         not_found_tickers_file = f"not_found_tickers_for_interval_{interval}.txt"
 
-        tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
         if date.today().day == 1 or not os.path.exists(tickers_file):
-            tickers = scrape_milan_stocks(db_folder)
-            save_tickers_file(db_folder, tickers)
             save_not_found_tickers(db_folder, set(), not_found_tickers_file) # reset dei not found tickers
-        else:
-            tickers = load_tickers_file(db_folder)
-
-        if not tickers:
-            print("⚠️ Nessun dato trovato.")
-            continue
 
         not_found_tickers_set = load_not_found_tickers(db_folder, not_found_tickers_file)
         for t in (t for t in tickers if t not in not_found_tickers_set):
