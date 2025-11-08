@@ -1,8 +1,8 @@
 name: Automated trader
 
 on:
-#  schedule:
-#    - cron: "0 0 * * *"   # ogni giorno alle 00:00 UTC
+  schedule:
+    - cron: "0 0 * * *"   # ogni giorno alle 00:00 UTC
     # - cron: "0 8 * * *"   # ogni giorno alle 08:00 UTC
     # - cron: "0 12 * * *"  # ogni giorno alle 12:00 UTC
     # - cron: "0 16 * * *"  # ogni giorno alle 16:00 UTC

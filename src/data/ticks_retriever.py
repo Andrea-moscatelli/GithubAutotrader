@@ -1,112 +1,37 @@
+import os
+import re
 import shutil
-
-import yfinance as yf
 import sqlite3
 from datetime import datetime, timezone, date, timedelta
-import re
 
-import os
 import pandas as pd
+import yfinance as yf
 from playwright.sync_api import sync_playwright
 
-# DB_PATH = "db/italian_stocks.db"
 DB_NAME = "italian_stocks.db"
 MILAN_TICKERS_FILE_NAME = "milan_tickers.csv"
 BASE_URL = "https://live.euronext.com/en/markets/milan/equities/list?page={}"
-TICKS_INTERVAL = "5m"
-DAYS_TO_RETRIEVE = 59
+INTERVALS_CONFIG = {
+    "2m": 59,    # ultimi 59 giorni
+    "1h": 729    # ultimi 729 giorni (~2 anni)
+}
 
-NOT_WORKING_TICKERS = f"not_found_tickers_for_interval_{TICKS_INTERVAL}.txt"
+# Parametri configurabili tramite environment
+RESET = os.environ.get("RESET", "FALSE").upper()  # default FALSE
 
 
-def load_not_found_tickers(db_folder):
+def load_not_found_tickers(db_folder, file_name):
     try:
-        with open(os.path.join(db_folder, NOT_WORKING_TICKERS), "r") as f:
+        with open(os.path.join(db_folder, file_name), "r") as f:
             return set(line.strip() for line in f if line.strip())
     except FileNotFoundError:
         return set()
 
-
 # funzione per salvare il set su file
-def save_not_found_tickers(db_folder, tickers_set):
-    with open(os.path.join(db_folder, NOT_WORKING_TICKERS), "w") as f:
+def save_not_found_tickers(db_folder, tickers_set, file_name):
+    with open(os.path.join(db_folder, file_name), "w") as f:
         for ticker in tickers_set:
             f.write(f"{ticker}\n")
-
-
-# def get_italian_tickers(headless=True, delay=1.0):
-#     """
-#     Usa Selenium per navigare tra le pagine del listino A-Z di Borsa Italiana.
-#     Cicla su 'page' fino a quando la pagina corrente è uguale alla precedente.
-#     Restituisce una lista di ticker con suffisso '.MI'.
-#     """
-#     base_url = "https://www.borsaitaliana.it/borsa/azioni/listino-a-z.html?page={}&lang=it"
-#     tickers = set()
-#     prev_page_tickers = set()
-#
-#     # Configura Chrome headless
-#     options = Options()
-#     if headless:
-#         options.add_argument("--headless=new")
-#     options.add_argument("--no-sandbox")
-#     options.add_argument("--disable-dev-shm-usage")
-#
-#     driver = webdriver.Chrome(options=options)
-#
-#     page = 1
-#     while True:
-#         url = base_url.format(page)
-#         driver.get(url)
-#         time.sleep(delay)
-#
-#         html = driver.page_source
-#         soup = BeautifulSoup(html, "html.parser")
-#         table = soup.find("table")
-#         if not table:
-#             print(f"⚠️ Nessuna tabella trovata a pagina {page}")
-#             break
-#
-#         current_page_tickers = set()
-#         for tr in table.find_all("tr"):
-#             cols = tr.find_all("td")
-#             if not cols:
-#                 continue
-#             a = cols[0].find("a")
-#             if a and a.text.strip():
-#                 t = a.text.strip().upper()
-#                 if not t.endswith(".MI"):
-#                     t += ".MI"
-#                 current_page_tickers.add(t)
-#
-#         # Se la pagina è identica alla precedente, abbiamo finito
-#         if current_page_tickers == prev_page_tickers or not current_page_tickers:
-#             print(f"✅ Fine raggiunta a pagina {page}.")
-#             break
-#
-#         tickers.update(current_page_tickers)
-#         prev_page_tickers = current_page_tickers
-#         page += 1
-#
-#     driver.quit()
-#     return sorted(tickers)
-
-
-# if __name__ == "__main__":
-#     all_tickers = fetch_borsa_italiana_tickers_selenium()
-#     print(f"Totale tickers trovati: {len(all_tickers)}")
-#     print(all_tickers[:20])
-
-
-# def get_italian_tickers():
-#     prendile da qui https://live.euronext.com/en/markets/milan/equities/list
-#     return [
-#         # "ENEL.MI"
-#         # "1AXP.MI",
-#         # "2ADBE.MI"
-#         "BMPS.MI"
-#         # , "ENI.MI", "ISP.MI", "UCG.MI", "LUX.MI",
-#         # "STM.MI", "ATL.MI", "TEN.MI", "MONC.MI", "REC.MI"
-#     ]
 
 
 def scrape_milan_stocks(db_folder):
@@ -163,6 +88,8 @@ def scrape_milan_stocks(db_folder):
             prev_tickers = current_tickers
             page_num += 1
 
+            # break  # TODO Rimuovi questa riga dopo i test
+
         browser.close()
 
     df = pd.DataFrame(data)
@@ -174,22 +101,23 @@ def scrape_milan_stocks(db_folder):
         if not sym.endswith(".MI"):
             sym += ".MI"
         tickers.append(sym)
+
+    # tickers = tickers[:20]  # TODO rimuovi questo limite dopo i test
     return tickers
 
 
-def table_name_for(ticker: str) -> str:
-    """Genera un nome tabella sicuro da un ticker (es: ENEL.MI -> t_ENEL_MI)."""
+def table_name_for(ticker: str, interval) -> str:
+    """Genera un nome tabella sicuro da un ticker, aggiungendo il suffisso interval."""
     safe = re.sub(r'[^0-9A-Za-z_]', '_', ticker)
-    return f"t_{safe}"
+    return f"t_{safe}_{interval}"
 
 
 def ensure_db(db_folder):
     """Crea la cartella del DB se non esiste. Restituisce True se il DB è nuovo."""
-    # rimuovi il file DB_PATH
-    if os.environ.get("RESET", "FALSE") == "TRUE" and os.path.exists(db_folder):
+    if RESET == "TRUE" and os.path.exists(db_folder):
         shutil.rmtree(db_folder)
         os.makedirs(db_folder)
-        print("!!!Dati app resettati!!!")
+        print("!!! Dati app resettati !!!")
 
     db_file_path = os.path.join(db_folder, DB_NAME)
     is_new = not os.path.exists(db_file_path)
@@ -199,9 +127,9 @@ def ensure_db(db_folder):
     return is_new
 
 
-def create_table_for_ticker_if_not_exists(ticker: str, db_folder):
+def create_table_for_ticker_if_not_exists(ticker: str, db_folder, interval):
     """Crea la tabella specifica per il ticker se non esiste."""
-    table = table_name_for(ticker)
+    table = table_name_for(ticker, interval)
     db_file_path = os.path.join(db_folder, DB_NAME)
     conn = sqlite3.connect(db_file_path)
     cursor = conn.cursor()
@@ -215,13 +143,19 @@ def create_table_for_ticker_if_not_exists(ticker: str, db_folder):
             volume INTEGER
         )
     """)
+
+    cursor.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_{table}_datetime
+        ON {table}(datetime)
+    """)
+
     conn.commit()
     conn.close()
 
 
-def get_last_timestamp(ticker: str, db_folder):
+def get_last_timestamp(ticker: str, db_folder, interval):
     """Restituisce l'ultimo timestamp disponibile nella tabella del ticker o None."""
-    table = table_name_for(ticker)
+    table = table_name_for(ticker, interval)
     db_file_path = os.path.join(db_folder, DB_NAME)
     conn = sqlite3.connect(db_file_path)
     cursor = conn.cursor()
@@ -330,11 +264,11 @@ def normalize_yf_df(df, default_ticker=None):
     return out[["datetime", "open", "high", "low", "close", "volume"]]
 
 
-def download_data(ticker: str, start: datetime, end: datetime):
-    print(f"📥 Scarico dati per {ticker} da {start} a {end}...")
+def download_data(ticker: str, start: datetime, end: datetime, interval):
+    print(f"📥 Scarico dati per {ticker} da {start} a {end} con intervallo {interval}...")
     df = yf.download(
         ticker,
-        interval=TICKS_INTERVAL,
+        interval=interval,
         start=start,
         end=end,
         progress=False,
@@ -360,12 +294,12 @@ def download_data(ticker: str, start: datetime, end: datetime):
     return df_clean[["datetime", "open", "high", "low", "close", "volume"]]
 
 
-def add_to_db(df: pd.DataFrame, ticker: str, db_folder):
+def add_to_db(df: pd.DataFrame, ticker: str, db_folder, interval):
 
     if df is None or df.empty:
         return
-    create_table_for_ticker_if_not_exists(ticker, db_folder)
-    table = table_name_for(ticker)
+    create_table_for_ticker_if_not_exists(ticker, db_folder, interval)
+    table = table_name_for(ticker, interval)
 
     def to_iso(val):
         if pd.isna(val):
@@ -416,63 +350,83 @@ def add_to_db(df: pd.DataFrame, ticker: str, db_folder):
     conn.close()
 
 
-def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder):
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=DAYS_TO_RETRIEVE)
+def interval_as_a_timedelta(interval: str) -> timedelta:
+    """
+    Converte un intervallo di Yahoo Finance (stringa) in timedelta.
+    Esempi:
+        '1m' -> timedelta(minutes=1)
+        '2m' -> timedelta(minutes=2)
+        '30m' -> timedelta(minutes=30)
+        '1h' -> timedelta(hours=1)
+        '1d' -> timedelta(days=1)
+    """
+    interval = interval.lower().strip()
+    if interval.endswith("m"):
+        return timedelta(minutes=int(interval[:-1]))
+    elif interval.endswith("h"):
+        return timedelta(hours=int(interval[:-1]))
+    elif interval.endswith("d"):
+        return timedelta(days=int(interval[:-1]))
+    else:
+        raise ValueError(f"Intervallo non supportato: {interval}")
 
-    last_ts = None
+
+def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder, day_to_retrieve, interval):
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=day_to_retrieve)
+
+    last_ts_in_db = None
     if not is_first_run:
-        last_ts = get_last_timestamp(ticker, db_folder)
-        if not last_ts:
-            print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi 59 giorni completi.")
-        elif last_ts and last_ts < end - timedelta(minutes=5):
-            start = last_ts + timedelta(minutes=5)
+        delta_time = interval_as_a_timedelta(interval)
+        last_ts_in_db = get_last_timestamp(ticker, db_folder, interval)
+        if not last_ts_in_db:
+            print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi {interval} giorni completi.")
+        elif last_ts_in_db and start < last_ts_in_db < end - delta_time:
+            start = last_ts_in_db + delta_time
         else:
             print(f"✅ {ticker}: dati già aggiornati")
             return
 
-    df = download_data(ticker, start, end)
-    if (df is None or df.empty) and not last_ts: #TODO oppure il last_ts è più vecchio di X giorni? i ticks che hanno come ultimo valore un prezzo di un anno fa devo smettere di cercare di reperirlo
+    df = download_data(ticker, start, end, interval)
+    # non ho trovato niente e non ho mai avuto niente, oppure non ho trovato niente e il last_ts è più vecchio di X giorni? ad esempio i ticks che hanno come ultimo valore un prezzo di anni fa devo smettere di cercare di reperirli
+    if (df is None or df.empty) and (not last_ts_in_db or (end - last_ts_in_db).days > day_to_retrieve):
         return False
 
-    add_to_db(df, ticker, db_folder)
+    add_to_db(df, ticker, db_folder, interval)
     print(f"✅ {ticker}: processate {len(df) if df is not None else 0} righe.")
     return True
 
 
-def main(db_folder):
+def main(db_folder: str):
     is_first_run = ensure_db(db_folder)
 
-    tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
-    if date.today().day == 1 or not os.path.exists(tickers_file): # primo del mese, riscarica i tickers
-        tickers = scrape_milan_stocks(db_folder)
-        # tickers = tickers[:20]
-        save_tickers_file(db_folder, tickers)
-    else:
-        tickers = load_tickers_file(db_folder)
-    if not tickers:
-        print("⚠️ Nessun dato trovato.")
-        return
+    for interval, day_to_retrieve in INTERVALS_CONFIG.items():
+        print(f"\n🔹 Avvio aggiornamento dati per intervallo {interval} ({day_to_retrieve} giorni)...")
+        not_found_tickers_file = f"not_found_tickers_for_interval_{interval}.txt"
 
-    # tickers = get_italian_tickers()
+        tickers_file = os.path.join(db_folder, MILAN_TICKERS_FILE_NAME)
+        if date.today().day == 1 or not os.path.exists(tickers_file):
+            tickers = scrape_milan_stocks(db_folder)
+            save_tickers_file(db_folder, tickers)
+            save_not_found_tickers(db_folder, set(), not_found_tickers_file) # reset dei not found tickers
+        else:
+            tickers = load_tickers_file(db_folder)
 
-    print("🚀 Avvio aggiornamento dati azioni italiane")
-    if is_first_run:
-        print("📂 Database nuovo: scarico ultimi 6 mesi completi...")
-    else:
-        print("📈 Database esistente: aggiorno solo nuovi dati...")
+        if not tickers:
+            print("⚠️ Nessun dato trovato.")
+            continue
 
-    not_found_tickers = load_not_found_tickers(db_folder)
-    for t in (t for t in tickers if t not in not_found_tickers):
-        try:
-            if not upsert_ticker_data(t, is_first_run, db_folder):
-                not_found_tickers.add(t)
-        except Exception as e:
-            print(f"❌ Errore con {t}: {e}")
+        not_found_tickers_set = load_not_found_tickers(db_folder, not_found_tickers_file)
+        for t in (t for t in tickers if t not in not_found_tickers_set):
+            try:
+                if not upsert_ticker_data(t, is_first_run, db_folder, day_to_retrieve, interval):
+                    not_found_tickers_set.add(t)
+            except Exception as e:
+                print(f"❌ Errore con {t}: {e}")
 
-    save_not_found_tickers(db_folder, not_found_tickers)
+        save_not_found_tickers(db_folder, not_found_tickers_set, not_found_tickers_file)
 
-    print("🏁 Aggiornamento completato.")
+    print("\n🏁 Aggiornamento completato per tutti gli intervalli.")
 
 
 def load_tickers_file(db_folder: str) -> list:
