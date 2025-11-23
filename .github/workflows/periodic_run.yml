@@ -22,7 +22,7 @@ jobs:
 
     # VARIABILI GLOBALI DEL JOB
     env:
-      DB_DIR: data
+      DB_DIR: data/db
       DB_NAME: italian_stocks.db
 
     steps:

@@ -380,7 +380,7 @@ def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder, day_to_retrie
         delta_time = interval_as_a_timedelta(interval)
         last_ts_in_db = get_last_timestamp(ticker, db_folder, interval)
         if not last_ts_in_db:
-            print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi {interval} giorni completi.")
+            print(f"⚠️ {ticker}: nessun dato trovato, scarico ultimi {day_to_retrieve} giorni completi con intervallo {interval}.")
         elif last_ts_in_db and start < last_ts_in_db < end - delta_time:
             start = last_ts_in_db + delta_time
         else:
