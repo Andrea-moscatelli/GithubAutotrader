@@ -447,4 +447,4 @@ def save_tickers_file(db_folder: str, tickers: list):
 
 
 if __name__ == "__main__":
-    main("db")
+    main("../../data/db")

@@ -7,3 +7,4 @@ data/db/*.db
 
 # NON IGNORARE I FRAMMENTI
 !data/db/*.db.part*
+/.venv_11/
