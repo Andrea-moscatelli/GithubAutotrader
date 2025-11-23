@@ -420,7 +420,7 @@ def main(db_folder: str):
             save_not_found_tickers(db_folder, set(), not_found_tickers_file) # reset dei not found tickers
 
         not_found_tickers_set = load_not_found_tickers(db_folder, not_found_tickers_file)
-        for t in (t for t in tickers[:100] if t not in not_found_tickers_set):
+        for t in (t for t in tickers if t not in not_found_tickers_set):
             try:
                 if not upsert_ticker_data(t, is_first_run, db_folder, day_to_retrieve, interval):
                     not_found_tickers_set.add(t)
