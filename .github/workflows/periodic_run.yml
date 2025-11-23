@@ -12,6 +12,7 @@ on:
         description: 'Set it to TRUE if you want to reinitialize the app data'
         required: true
         default: 'FALSE'
+
 permissions:
   contents: write  # necessario per push
 
@@ -19,9 +20,24 @@ jobs:
   update:
     runs-on: ubuntu-latest
 
+    # VARIABILI GLOBALI DEL JOB
+    env:
+      DB_DIR: data
+      DB_NAME: italian_stocks.db
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # --- RICOSTRUZIONE DB PRIMA DEL RUN ---
+      - name: Ricostruisci DB se frammentato
+        run: |
+          if ls "$DB_DIR/$DB_NAME".part* 1> /dev/null 2>&1; then
+            echo "Ricostruzione del database da parti..."
+            cat "$DB_DIR/$DB_NAME".part* > "$DB_DIR/$DB_NAME"
+          else
+            echo "Nessun frammento trovato, uso DB esistente se presente."
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,8 +45,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install system dependencies for Playwright
-        run: |
-          sudo npx playwright install-deps
+        run: sudo npx playwright install-deps
 
       - name: Install dependencies
         run: |
@@ -46,6 +61,20 @@ jobs:
           RESET: ${{ github.event.inputs.reset }}
           PYTHONPATH: ${{ github.workspace }}
 
+      # --- SPLIT DOPO IL RUN ---
+      - name: Split DB in parti da 99 MB
+        run: |
+          DB_PATH="$DB_DIR/$DB_NAME"
+
+          if [ -f "$DB_PATH" ]; then
+            echo "Splitting database..."
+            split -b 99m "$DB_PATH" "${DB_PATH}.part"
+            rm "$DB_PATH"
+          else
+            echo "Database non trovato, nessuno split."
+          fi
+
+      # --- COMMIT DEI FRAMMENTI ---
       - name: Commit updated database
         run: |
           git config user.name "GitHub Actions"

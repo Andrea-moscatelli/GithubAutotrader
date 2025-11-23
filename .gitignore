@@ -1,3 +1,9 @@
 # Created by venv; see https://docs.python.org/3/library/venv.html
 .idea/
 *.DS_Store
+
+# IGNORA IL DB INTERO
+data/*.db
+
+# NON IGNORARE I FRAMMENTI
+!data/*.db.part*
