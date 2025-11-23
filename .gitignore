@@ -3,7 +3,7 @@
 *.DS_Store
 
 # IGNORA IL DB INTERO
-data/*.db
+data/db/*.db
 
 # NON IGNORARE I FRAMMENTI
-!data/*.db.part*
+!data/db/*.db.part*

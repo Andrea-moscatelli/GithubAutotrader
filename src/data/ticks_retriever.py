@@ -411,6 +411,7 @@ def main(db_folder: str):
         print("⚠️ Nessun dato trovato.")
         return
 
+
     for interval, day_to_retrieve in INTERVALS_CONFIG.items():
         print(f"\n🔹 Avvio aggiornamento dati per intervallo {interval} ({day_to_retrieve} giorni)...")
         not_found_tickers_file = f"not_found_tickers_for_interval_{interval}.txt"
@@ -419,7 +420,7 @@ def main(db_folder: str):
             save_not_found_tickers(db_folder, set(), not_found_tickers_file) # reset dei not found tickers
 
         not_found_tickers_set = load_not_found_tickers(db_folder, not_found_tickers_file)
-        for t in (t for t in tickers if t not in not_found_tickers_set):
+        for t in (t for t in tickers[:100] if t not in not_found_tickers_set):
             try:
                 if not upsert_ticker_data(t, is_first_run, db_folder, day_to_retrieve, interval):
                     not_found_tickers_set.add(t)
