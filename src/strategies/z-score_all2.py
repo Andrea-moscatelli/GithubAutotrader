@@ -1,10 +1,12 @@
 import sqlite3
 import pandas as pd
-import numpy as np
 from scipy.stats import skew
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, roc_auc_score
+import math
 
-DB_PATH = "italian_stocks.db"
-
+DB_PATH = "../../data/db/italian_stocks.db"
 INITIAL_CAPITAL = 100_000
 
 ROLLING_WINDOW = 20
@@ -13,12 +15,15 @@ ZSCORE_THRESHOLD = 2.0
 VALIDATION_RATIO = 0.6  # 60% validation / 40% test
 TOP_N = 10
 
-COMMISSION_TYPE = "percent"
-COMMISSION_VALUE = 0.0019
+COMMISSION_TYPE = "percent"  # "percent" o "fixed"
+COMMISSION_VALUE = 0.0019  # 0.19% o importo fisso
 
 VALIDATION_RESULTS_FILE = "validation_results.csv"
 
 
+# =========================
+# UTILITIES
+# =========================
 def get_all_tables(db_path):
     conn = sqlite3.connect(db_path)
     tables = pd.read_sql(
@@ -46,25 +51,78 @@ def split_validation_test(df, ratio):
     return df.iloc[:split].copy(), df.iloc[split:].copy()
 
 
+def extract_interval_from_table(table_name: str) -> str:
+    interval = table_name.split("_")[-1]
+    if interval not in {"1d", "1h", "2m"}:
+        raise ValueError(f"Interval non riconosciuto: {interval}")
+    return interval
+
+
+def annualization_factor(interval: str) -> int:
+    trading_days = 252
+    hours_per_day = 8
+    if interval.endswith("d"):
+        return trading_days
+    if interval.endswith("h"):
+        hours = int(interval.replace("h", ""))
+        return trading_days * (hours_per_day // hours)
+    if interval.endswith("m"):
+        minutes = int(interval.replace("m", ""))
+        bars_per_day = (hours_per_day * 60) // minutes
+        return trading_days * bars_per_day
+    raise ValueError(f"Interval non supportato: {interval}")
+
+
+def bars_in_4_weeks(interval: str) -> int:
+    """
+    Restituisce il numero di barre che corrispondono a 4 settimane di trading
+    considerando l'interval.
+    """
+    trading_days_per_week = 5
+
+    if interval.endswith("d"):
+        bars_per_day = 1
+    elif interval.endswith("h"):
+        hours_per_day = 8
+        bars_per_day = hours_per_day // int(interval.replace("h", ""))
+    elif interval.endswith("m"):
+        minutes_per_day = 8 * 60
+        bars_per_day = minutes_per_day // int(interval.replace("m", ""))
+    else:
+        raise ValueError(f"Interval non supportato: {interval}")
+
+    return bars_per_day * trading_days_per_week * 4  # 4 settimane
+
+# =========================
+# BACKTEST ENGINE
+# =========================
 def run_backtest(df):
     df = df.copy()
 
+    # Z-score
     df["mean"] = df["close"].rolling(ROLLING_WINDOW).mean()
     df["std"] = df["close"].rolling(ROLLING_WINDOW).std()
-    df["zscore"] = (df["close"] - df["mean"]) / df["std"]
+    # df.loc[df["std"] == 0, "std"] = np.nan
+    # df["zscore"] = (df["close"] - df["mean"]) / df["std"]
 
+    df["zscore"] = np.where(
+        df["std"] > 0,
+        (df["close"] - df["mean"]) / df["std"],
+        0
+    )
+
+    # Posizione
     df["position"] = 0
     df.loc[df["zscore"] < -ZSCORE_THRESHOLD, "position"] = 1
     df.loc[df["zscore"] > ZSCORE_THRESHOLD, "position"] = -1
     df["position"] = df["position"].replace(0, np.nan).ffill().fillna(0)
 
-    # calcolo differenza posizione
+    # Differenza posizione -> numero ordini
     df["trades"] = df["position"].diff().fillna(0)
-
     # valore negoziato = |Δposition| * INITIAL_CAPITAL => ad ogni trade investo INITIAL_CAPITAL
     df["traded_value"] = df["trades"].abs() * INITIAL_CAPITAL
 
-    # commissione
+    # Commissioni
     if COMMISSION_TYPE == "percent":
         df["commission"] = df["traded_value"] * COMMISSION_VALUE
     elif COMMISSION_TYPE == "fixed":
@@ -72,82 +130,61 @@ def run_backtest(df):
     else:
         df["commission"] = 0.0
 
-    # df["trades"] = df["position"].diff().abs().fillna(0)
-    #
-    # df["commission"] = 0.0
-    # if COMMISSION_TYPE == "percent":
-    #     df.loc[df["trades"] > 0, "commission"] = (
-    #             df["trades"] * INITIAL_CAPITAL * COMMISSION_VALUE
-    #     )
-
-    # df["returns"] = df["close"].pct_change()
-    # df["strategy_returns"] = (
-    #         df["position"].shift(1) * df["returns"]
-    #         - df["commission"] / INITIAL_CAPITAL
-    # )
-    #
-    # df["equity"] = (1 + df["strategy_returns"]).cumprod() * INITIAL_CAPITAL
-
+    # Ritorni giornalieri
     df["returns"] = df["close"].pct_change()
 
-    # moltiplico per INITIAL_CAPITAL per ottenere guadagno in € reale
+    # Guadagno/Perdita in € reale
     df["strategy_returns"] = df["position"].shift(1) * (df["returns"] * INITIAL_CAPITAL) - df["commission"]
 
-    # equity cumulata
+    # Pulizia dati
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.fillna(0, inplace=True)
+
+    # Equity cumulata
     df["equity"] = INITIAL_CAPITAL + df["strategy_returns"].cumsum()
 
     return df
 
 
-def annualization_factor(interval):
-    if interval == "1d":
-        return 252
-    if interval == "1h":
-        return 252 * 8
-    if interval == "2m":
-        return 252 * 240
-    raise ValueError("Interval not supported")
-
-
-def extract_interval_from_table(table_name: str) -> str:
-    """
-    Estrae l'interval dal nome tabella.
-    Esempi:
-    - t_ENI_2m -> '2m'
-    - t_FCA_1h -> '1h'
-    """
-    try:
-        interval = table_name.split("_")[-1]
-        if interval not in {"1d", "1h", "2m"}:
-            raise ValueError(f"Interval per tabella {table_name} non riconosciuto: {interval}")
-        return interval
-    except IndexError:
-        raise ValueError(f"Nome tabella non valido: {table_name}")
-
-
+# =========================
+# METRICHE
+# =========================
 def compute_metrics(df, interval):
-    pnl = df["equity"].iloc[-1] - INITIAL_CAPITAL
+    """
+   Calcola tutte le metriche principali di performance della strategia.
 
+   Metriche calcolate:
+    - pnl: perdita massima dal picco all’abbassamento più basso. Misura il rischio di ribasso e l’ampiezza dei drawdown.
+    - sharpe: misura del rapporto rischio/ritorno. Indica quanto rendimento extra si ottiene per unità di rischio (volatilità).
+    - max_drawdown: misura del rapporto rischio/ritorno. Indica quanto rendimento extra si ottiene per unità di rischio (volatilità).
+    - win_rate: profitto o perdita totale in euro nel periodo considerato. Indica quanto la strategia ha guadagnato o perso.
+    - skewness: asimmetria della distribuzione dei ritorni. Negativo → rischio di code lunghe verso perdite estreme; positivo → code verso guadagni.
+    - turnover: Numero medio di trade o variazione di posizione. Indica quanto la strategia scambia spesso e impatta costi di commissione.
+    - volatility: Deviazione standard dei ritorni annualizzata. Misura quanto sono oscillanti i prezzi (rischio di mercato).
+    - pnl_rolling_4w: Numero medio di trade o variazione di posizione. Indica quanto la strategia scambia spesso e impatta costi di commissione.
+    - total_trades: numero totale di trades effettuati
+   """
+    pnl = df["equity"].iloc[-1] - INITIAL_CAPITAL
     factor = annualization_factor(interval)
 
-    # ritorno percentuale sul capitale investito
+    # percentuali sul capitale investito
     df["strategy_returns_pct"] = df["strategy_returns"] / INITIAL_CAPITAL
 
     sharpe = (
-                     df["strategy_returns_pct"].mean() / df["strategy_returns_pct"].std()
+                 df["strategy_returns_pct"].mean() / df["strategy_returns_pct"].std()
+                 if df["strategy_returns_pct"].std() > 0 else 0.0
              ) * np.sqrt(factor)
 
     drawdown = (df["equity"] / df["equity"].cummax() - 1).min()
-
     win_rate = (df["strategy_returns"] > 0).mean()
-
     skewness = skew(df["strategy_returns_pct"].dropna())
-
-    turnover = df["trades"].mean()
-
+    turnover = df["trades"].abs().mean()
+    total_trades = df["trades"].abs().sum()
     volatility = df["returns"].std() * np.sqrt(factor)
 
-    rolling_pnl_3w = df["strategy_returns"].rolling(15).sum().mean()
+    n_bars = bars_in_4_weeks(interval)
+    rolling_pnl_4w = df["strategy_returns"].rolling(n_bars).sum().mean()
+
 
     return {
         "pnl": pnl,
@@ -156,25 +193,28 @@ def compute_metrics(df, interval):
         "win_rate": win_rate,
         "skewness": skewness,
         "turnover": turnover,
+        "total_trades": total_trades,
         "volatility": volatility,
-        "pnl_rolling_3w": rolling_pnl_3w,
+        "pnl_rolling_4w": rolling_pnl_4w,
     }
 
 
+# =========================
+# VALIDATION
+# =========================
 def run_validation():
     tables = get_all_tables(DB_PATH)
     results = []
 
-    for table in tables:
+    for idx, table in enumerate(tables):
+        print(f"Validating table {idx + 1}/{len(tables)}: {table}")
         df = load_data(DB_PATH, table)
         if len(df) < 100:
             continue
-
         val, _ = split_validation_test(df, VALIDATION_RATIO)
         bt = run_backtest(val)
         interval = extract_interval_from_table(table)
         metrics = compute_metrics(bt, interval)
-
         metrics["table"] = table
         results.append(metrics)
 
@@ -187,22 +227,100 @@ def load_validation_results():
     return pd.read_csv(VALIDATION_RESULTS_FILE)
 
 
-def select_top_n(df, n):
-    return (
-        df.sort_values("sharpe", ascending=False)
-        .head(n)["table"]
-        .tolist()
-    )
+# def select_top_n(df, n):
+#     return df.sort_values("sharpe", ascending=False).head(n)["table"].tolist()
+
+def select_top_n(df, top_n, weights):
+    """
+    Ritorna le top N tabelle basate su un ranking multi-metrica avanzato.
+
+    Parametri:
+    - df: DataFrame con tutte le metriche di validation per ogni tabella
+    - top_n: numero di tabelle da selezionare
+    - weights: dizionario dei pesi per ciascuna metrica
+        Esempio:
+        weights = {
+            "sharpe": 0.3,
+            "pnl": 0.25,
+            "max_drawdown": 0.15,
+            "win_rate": 0.1,
+            "skewness": 0.05,
+            "volatility": 0.05,
+            "turnover": 0.05,
+            "pnl_rolling_4w": 0.05
+        }
+
+    Restituisce:
+    - lista delle top N tabelle
+    """
+    df = df.copy()
+
+    # Default weights se non forniti
+    # if weights is None:
+    #     weights = {
+    #         "sharpe": 0.3,
+    #         "total_trades": 0.2,
+    #         "pnl_rolling_4w": 0.1,
+    #         "win_rate": 0.1,
+    #         "max_drawdown": 0.1,
+    #         "volatility": 0.1,
+    #         "skewness": 0.05,
+    #         "turnover": 0.05,
+    #         "pnl": 0.0,
+    #     }
+
+    # Lista di metriche da considerare
+    metrics = list(weights.keys())
+
+    # Normalizzazione z-score
+    for m in metrics:
+        if m not in df.columns:
+            continue
+        # Invertiamo il segno per metriche dove minore è meglio
+        if m in ["max_drawdown", "volatility", "turnover"]:
+            df[f"{m}_z"] = -(df[m] - df[m].mean()) / df[m].std()
+        else:
+            df[f"{m}_z"] = (df[m] - df[m].mean()) / df[m].std()
+
+    # Score combinato
+    df["score"] = sum(df[f"{m}_z"] * weights.get(m, 0) for m in metrics if f"{m}_z" in df.columns)
+
+    # Selezione top N
+    top_tables = df.sort_values("score", ascending=False).head(top_n)["table"].tolist()
+    return top_tables
 
 
+# =========================
+# TEST
+# =========================
 def run_test_on_selected(tables):
     results = []
 
     for table in tables:
         df = load_data(DB_PATH, table)
         _, test = split_validation_test(df, VALIDATION_RATIO)
-
         bt = run_backtest(test)
+        pnl = bt["equity"].iloc[-1] - INITIAL_CAPITAL
+        results.append({
+            "table": table,
+            "test_pnl": pnl
+        })
+
+    return pd.DataFrame(results)
+
+def run_test_all_tables(db_path, validation_ratio):
+    tables = get_all_tables(db_path)
+    results = []
+
+    for idx, table in enumerate(tables):
+        print(f"Test table {idx + 1}/{len(tables)}: {table}")
+        df = load_data(db_path, table)
+        if len(df) < 100:
+            continue
+
+        _, test = split_validation_test(df, validation_ratio)
+        bt = run_backtest(test)
+
         pnl = bt["equity"].iloc[-1] - INITIAL_CAPITAL
 
         results.append({
@@ -212,18 +330,556 @@ def run_test_on_selected(tables):
 
     return pd.DataFrame(results)
 
+def portfolio_pnl_from_selection(test_results_df, selected_tables):
+    portfolio = test_results_df[
+        test_results_df["table"].isin(selected_tables)
+    ]
 
+    return {
+        "tables": selected_tables,
+        "portfolio_pnl": portfolio["test_pnl"].sum(),
+        "avg_pnl": portfolio["test_pnl"].mean()
+    }
+
+def get_real_top_n_test(test_results_df, n):
+    return (
+        test_results_df
+        .sort_values("test_pnl", ascending=False)
+        .head(n)
+        .reset_index(drop=True)
+    )
+
+
+def attach_validation_metrics(real_top_n_df, validation_df):
+    return real_top_n_df.merge(
+        validation_df,
+        on="table",
+        how="left",
+        suffixes=("_test", "_validation")
+    )
+
+def portfolio_stats(test_results_df, tables):
+    """
+    Calcola statistiche di portafoglio dato un insieme di tabelle.
+    Ogni tabella investe INITIAL_CAPITAL.
+    """
+    df = test_results_df[test_results_df["table"].isin(tables)]
+
+    return {
+        "num_assets": len(df),
+        "total_pnl": df["test_pnl"].sum(),
+        "avg_pnl": df["test_pnl"].mean(),
+        "positive_ratio": (df["test_pnl"] > 0).mean()
+    }
+
+def efficiency_score(selected_stats, oracle_stats):
+    """
+    Calcola l'efficienza della selezione ex-ante rispetto all'oracle.
+    1.0 → selezione perfetta (impossibile nella realtà)
+    0.6 → molto buona
+    0.4 → discreta
+    < 0.3 → segnali deboli / ranking rumoroso
+    < 0 → selezione dannosa
+    """
+    oracle_pnl = oracle_stats["total_pnl"]
+    selected_pnl = selected_stats["total_pnl"]
+
+    if oracle_pnl == 0:
+        return np.nan
+
+    return selected_pnl / oracle_pnl
+
+def build_validation_roc_dataset(validation_df):
+    """
+    Costruisce il dataset per ROC usando solo il validation set.
+    target = 1 se pnl > 0
+    target = 0 altrimenti
+    """
+    df = validation_df.copy()
+
+    # Target binario: azione profittevole nel validation
+    df["positive"] = (df["pnl"] > 0).astype(int)
+
+    return df
+
+def plot_roc_for_metric_validation(df, metric):
+    """
+    Plotta la ROC curve per una metrica (validation only),
+    mostrando nel titolo la threshold ottimale.
+    """
+    scores = df[metric]
+    y_true = df["positive"]
+
+    # Rimuoviamo NaN
+    mask = scores.notna()
+    scores = scores[mask]
+    y_true = y_true[mask]
+
+    # # Alcune metriche vanno invertite (più basso è meglio)
+    # if metric in ["max_drawdown", "volatility", "turnover"]:
+    #     scores = -scores
+
+    fpr, tpr, thresholds = roc_curve(y_true, scores)
+    auc = roc_auc_score(y_true, scores)
+
+    # Youden's J statistic
+    j_scores = tpr - fpr
+    best_idx = np.argmax(j_scores)
+    best_threshold = thresholds[best_idx]
+
+    # Plot
+    plt.figure(figsize=(6, 5))
+    plt.plot(fpr, tpr, label=f"AUC = {auc:.3f}")
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
+    plt.scatter(
+        fpr[best_idx],
+        tpr[best_idx],
+        marker="o",
+        label="Optimal threshold"
+    )
+
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(
+        f"ROC – {metric}\nOptimal threshold = {best_threshold:.4f}"
+    )
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    return {
+        "metric": metric,
+        "auc": auc,
+        "best_threshold": best_threshold,
+        "tpr": tpr[best_idx],
+        "fpr": fpr[best_idx]
+    }
+
+def roc_analysis_validation(validation_df, metrics):
+    roc_df = build_validation_roc_dataset(validation_df)
+    results = []
+
+    for metric in metrics:
+        res = plot_roc_for_metric_validation(roc_df, metric)
+        results.append(res)
+
+    return (
+        pd.DataFrame(results)
+        .sort_values("auc", ascending=False)
+        .reset_index(drop=True)
+    )
+
+def plot_all_roc_validation(validation_df, metrics):
+    """
+    Plotta tutte le curve ROC delle metriche di validation in un unico grafico.
+    Mostra AUC e threshold ottimale in legenda.
+    """
+    df = validation_df.copy()
+
+    # Target binario: pnl positivo nel validation
+    df["positive"] = (df["pnl"] > 0).astype(int)
+
+    plt.figure(figsize=(8, 7))
+
+    roc_summary = []
+
+    for metric in metrics:
+        scores = df[metric]
+        y_true = df["positive"]
+
+        # Rimozione NaN
+        mask = scores.notna()
+        scores = scores[mask]
+        y_true = y_true[mask]
+
+        if y_true.nunique() < 2:
+            continue  # ROC non definibile
+
+        # Metriche dove più basso è meglio → invertiamo
+        if metric in ["max_drawdown", "volatility", "turnover"]:
+            scores = -scores
+
+        fpr, tpr, thresholds = roc_curve(y_true, scores)
+        auc = roc_auc_score(y_true, scores)
+
+        # Youden's J
+        j_scores = tpr - fpr
+        best_idx = np.argmax(j_scores)
+        best_threshold = thresholds[best_idx]
+
+        plt.plot(
+            fpr,
+            tpr,
+            label=f"{metric} | AUC={auc:.2f} | thr={best_threshold:.3f}"
+        )
+
+        roc_summary.append({
+            "metric": metric,
+            "auc": auc,
+            "best_threshold": best_threshold
+        })
+
+    # Diagonale random
+    plt.plot([0, 1], [0, 1], linestyle="--", color="black", alpha=0.6)
+
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curves – Validation Metrics")
+    plt.legend(fontsize=9)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    return pd.DataFrame(roc_summary).sort_values("auc", ascending=False)
+
+def plot_roc_grid_validation(validation_df, metrics, cols=3):
+    """
+    Plotta una ROC per ogni metrica in una griglia di subplot
+    all'interno di un'unica finestra.
+    """
+    df = validation_df.copy()
+    df["positive"] = (df["pnl"] > 0).astype(int)
+
+    n_metrics = len(metrics)
+    rows = math.ceil(n_metrics / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 3 * rows))
+    axes = axes.flatten()
+
+    for i, metric in enumerate(metrics):
+        ax = axes[i]
+
+        scores = df[metric]
+        y_true = df["positive"]
+
+        mask = scores.notna()
+        scores = scores[mask]
+        y_true = y_true[mask]
+
+        if y_true.nunique() < 2:
+            ax.set_title(f"{metric} (not enough classes)")
+            continue
+
+        # # metriche dove minore è meglio
+        # if metric in ["max_drawdown", "volatility", "turnover"]:
+        #     scores = -scores
+
+        fpr, tpr, thresholds = roc_curve(y_true, scores)
+        auc = roc_auc_score(y_true, scores)
+
+        j_scores = tpr - fpr
+        best_idx = np.argmax(j_scores)
+        best_thr = thresholds[best_idx]
+
+        ax.plot(fpr, tpr, label=f"AUC={auc:.2f}")
+        ax.plot([0, 1], [0, 1], linestyle="--", color="gray")
+        ax.scatter(fpr[best_idx], tpr[best_idx], color="red", s=30)
+
+        ax.set_title(f"{metric}\nthr={best_thr:.3f}")
+        ax.set_xlabel("FPR")
+        ax.set_ylabel("TPR")
+        ax.grid(True)
+        ax.legend(fontsize=9)
+
+    # rimuove subplot vuoti
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+
+    fig.suptitle("ROC Curves – Validation Metrics", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
+def chose_tickers_by_validation_thresholds(validation_df, test_df, thresholds):
+    """
+    Seleziona i ticker da testare nel dataset di test,
+    basandosi sulle soglie calcolate sul validation set.
+
+    Parametri:
+    - validation_df: pd.DataFrame con metriche di validation, deve avere colonna 'table'
+    - thresholds: dict con le soglie, es.:
+        {
+            "drawdown": -0.239,
+            "volatility": 0.51,
+            "skewness": -0.177,
+            "turnover": 0.043,
+            "sharpe": 0.008
+        }
+
+    Restituisce:
+    - lista di ticker selezionati
+    """
+    # 1️⃣ seleziona i ticker validi in validation
+    df_filtered = validation_df.copy()
+
+    if "drawdown" in thresholds:
+        df_filtered = df_filtered[df_filtered["max_drawdown"] >= thresholds["drawdown"]]
+    if "volatility" in thresholds:
+        df_filtered = df_filtered[df_filtered["volatility"] <= thresholds["volatility"]]
+    if "skewness" in thresholds:
+        df_filtered = df_filtered[df_filtered["skewness"] >= thresholds["skewness"]]
+    if "turnover" in thresholds:
+        df_filtered = df_filtered[df_filtered["turnover"] <= thresholds["turnover"]]
+    if "sharpe" in thresholds:
+        df_filtered = df_filtered[df_filtered["sharpe"] >= thresholds["sharpe"]]
+
+    # 2️⃣ prendi solo i ticker
+    selected_tables = df_filtered["table"].unique()
+
+    return selected_tables
+
+def plot_metric_with_youden(validation_df, metric):
+    """
+    Grafico doppio per una metrica:
+    - Sopra: Youden's J vs soglia
+    - Sotto: istogramma valori della metrica per PnL positivo/negativo
+    Titolo: AUC e soglia ottimale
+    """
+    df = validation_df.copy()
+    df["positive"] = (df["pnl"] > 0).astype(int)
+
+    scores = df[metric].values
+    y_true = df["positive"].values
+
+    # Rimuoviamo NaN
+    mask = ~np.isnan(scores)
+    scores = scores[mask]
+    y_true = y_true[mask]
+
+    if len(np.unique(y_true)) < 2:
+        print(f"Non abbastanza classi per {metric}")
+        return
+
+    # invertiamo metriche dove più basso è meglio
+    invert_metrics = ["max_drawdown", "volatility", "turnover"]
+    if metric in invert_metrics:
+        scores = -scores
+
+    fpr, tpr, thresholds = roc_curve(y_true, scores)
+    auc = roc_auc_score(y_true, scores)
+
+    j_scores = tpr - fpr
+    best_idx = np.argmax(j_scores)
+    best_thr = thresholds[best_idx]
+
+    # --- plot ---
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True,
+                                   gridspec_kw={'height_ratios':[1, 1.5]})
+
+    # Sopra: Youden's J
+    ax1.plot(thresholds, j_scores, color='blue')
+    ax1.axvline(best_thr, color='red', linestyle='--', label=f"Optimal thr={best_thr:.3f}")
+    ax1.set_ylabel("Youden's J")
+    ax1.legend()
+    ax1.grid(True)
+
+    # Sotto: istogramma valori separati per target
+    pos_scores = scores[y_true == 1]
+    neg_scores = scores[y_true == 0]
+
+    bins = np.histogram_bin_edges(scores, bins='auto')
+    ax2.hist(pos_scores, bins=bins, alpha=0.6, label="PnL>0", color='green')
+    ax2.hist(neg_scores, bins=bins, alpha=0.6, label="PnL<0", color='red')
+    ax2.set_xlabel(metric)
+    ax2.set_ylabel("Count")
+    ax2.legend()
+    ax2.grid(True)
+
+    fig.suptitle(f"{metric} – AUC={auc:.3f}, Optimal threshold={best_thr:.3f}", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+
+    return best_thr, auc
+
+def plot_all_metrics_youden_stacked_cols(validation_df, metrics, cols=3):
+    """
+    Plotta tutte le metriche in un'unica finestra con più colonne.
+    Ogni metrica ha due subplot impilati verticalmente:
+    - sopra: Youden's J vs soglia
+    - sotto: istogramma valori per PnL positivo/negativo
+    """
+    df = validation_df.copy()
+    df["positive"] = (df["pnl"] > 0).astype(int)
+
+    n_metrics = len(metrics)
+    n_rows = math.ceil(n_metrics / cols) * 2  # due righe per metrica
+    fig, axes = plt.subplots(n_rows, cols, figsize=(4 * cols, 1.5 * n_rows), constrained_layout=True)
+
+    # Flatten axes per indicizzazione semplice
+    axes = axes.flatten() if n_metrics > 1 else [axes]
+
+    for i, metric in enumerate(metrics):
+        scores = df[metric].values
+        y_true = df["positive"].values
+        mask = ~np.isnan(scores)
+        scores = scores[mask]
+        y_true = y_true[mask]
+
+        if len(np.unique(y_true)) < 2:
+            continue
+
+        # invertiamo metriche dove minore è meglio
+        invert_metrics = ["max_drawdown", "volatility", "turnover"]
+        scores_plot = -scores if metric in invert_metrics else scores
+
+        # ROC + Youden
+        fpr, tpr, thresholds = roc_curve(y_true, scores_plot)
+        auc = roc_auc_score(y_true, scores_plot)
+        j_scores = tpr - fpr
+        best_idx = np.argmax(j_scores)
+        best_thr = thresholds[best_idx]
+
+        # Calcolo posizione subplot: due righe verticali per metrica
+        col = i % cols
+        row = (i // cols) * 2
+
+        ax_youden = axes[row * cols + col]
+        ax_hist = axes[(row + 1) * cols + col]
+
+        # Sopra: Youden
+        ax_youden.plot(thresholds, j_scores, color='blue')
+        ax_youden.axvline(best_thr, color='red', linestyle='--', label=f"Optimal thr={best_thr:.3f}")
+        ax_youden.set_ylabel("Youden's J")
+        ax_youden.set_title(f"{metric} – AUC={auc:.3f}")
+        ax_youden.grid(True)
+        ax_youden.legend(fontsize=8)
+
+        # Sotto: istogramma
+        pos_scores = scores[y_true==1]
+        neg_scores = scores[y_true==0]
+        bins = np.histogram_bin_edges(scores, bins='auto')
+        ax_hist.hist(pos_scores, bins=bins, alpha=0.6, color='green', label='PnL>0')
+        ax_hist.hist(neg_scores, bins=bins, alpha=0.6, color='red', label='PnL<0')
+        ax_hist.set_xlabel(metric)
+        ax_hist.set_ylabel("Count")
+        ax_hist.legend(fontsize=8)
+        ax_hist.grid(True)
+
+        # Allineiamo assi x
+        ax_youden.set_xlim(ax_hist.get_xlim())
+
+    # Rimuove eventuali subplot vuoti
+    for j in range(i*2 + 2, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.suptitle("ROC + Histogram Metrics – Validation Set", fontsize=16)
+    plt.show()
+
+
+
+
+
+
+# =========================
+# WORKFLOW
+# =========================
 # 1. Validation (una volta)
-validation_df = run_validation()
+# validation_df = run_validation()
 
-# 2. In futuro puoi fare solo:
+# 1. Carico metriche di validation
 validation_df = load_validation_results()
 
-# 3. Selezione
-top_tables = select_top_n(validation_df, TOP_N)
+metrics_weights = {
+    "sharpe": 0.3,
+    "total_trades": 0.2,
+    "pnl_rolling_4w": 0.1,
+    "win_rate": 0.1,
+    "max_drawdown": 0.1,
+    "volatility": 0.1,
+    "skewness": 0.05,
+    "turnover": 0.05,
+    "pnl": 0.0,
+}
 
-# 4. Test
-test_results = run_test_on_selected(top_tables)
+# plot_roc_grid_validation(
+#     validation_df=validation_df,
+#     metrics=metrics_weights.keys()
+# )
 
-print(test_results)
-print("PnL totale test:", test_results["test_pnl"].sum())
+plot_all_metrics_youden_stacked_cols(validation_df, metrics_weights.keys())
+
+# for metric in metrics_weights.keys():
+#     plot_metric_with_youden(validation_df, metric)
+
+exit()
+
+# roc_results = roc_analysis_validation(
+#     validation_df=validation_df,
+#     metrics=metrics_weights.keys()
+# )
+
+# print("ROC RESULTS: \n", roc_results)
+
+# 2. Selezione TOP N ex-ante (con ranking avanzato)
+top_n_selected = select_top_n(
+    validation_df,
+    top_n=TOP_N,
+    weights=metrics_weights
+)
+
+# 3. Test su TUTTE le azioni
+test_results_all = run_test_all_tables(DB_PATH, VALIDATION_RATIO)
+
+# 4. PnL portafoglio selezionato
+selected_portfolio = portfolio_pnl_from_selection(
+    test_results_all,
+    top_n_selected
+)
+
+# 5. Vere TOP N nel test
+real_top_n_test = get_real_top_n_test(
+    test_results_all,
+    TOP_N
+)
+
+# 6. Metriche di validation delle vere TOP N
+real_top_n_with_validation = attach_validation_metrics(
+    real_top_n_test,
+    validation_df
+)
+
+print("📦 PORTAFOGLIO SELEZIONATO (ex-ante)")
+print(selected_portfolio)
+
+print("\n🥇 REALI TOP N NEL TEST (oracle)")
+print(real_top_n_test)
+
+print("\n🔍 METRICHE DI VALIDATION DELLE REALI TOP N")
+print(
+    real_top_n_with_validation[
+        ["table", "test_pnl", "sharpe", "pnl", "max_drawdown",
+         "win_rate", "skewness", "turnover", "total_trades"]
+    ]
+)
+
+selected_portfolio_stats = portfolio_stats(
+    test_results_df=test_results_all,
+    tables=top_n_selected
+)
+
+print("📦 PORTAFOGLIO TOP N SELEZIONATE (ex-ante)")
+for k, v in selected_portfolio_stats.items():
+    print(f"{k}: {v}")
+
+
+real_top_n_tables = real_top_n_test["table"].tolist()
+
+oracle_portfolio_stats = portfolio_stats(
+    test_results_df=test_results_all,
+    tables=real_top_n_tables
+)
+
+print("\n🥇 PORTAFOGLIO TOP N ORACLE (ex-post)")
+for k, v in oracle_portfolio_stats.items():
+    print(f"{k}: {v}")
+
+# Efficiency score
+eff_score = efficiency_score(
+    selected_portfolio_stats,
+    oracle_portfolio_stats
+)
+
+print("\n📊 EFFICIENCY SCORE")
+print(f"Efficiency Score: {eff_score:.2f}")
+
+
