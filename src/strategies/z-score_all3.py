@@ -18,7 +18,9 @@ VALIDATION_RATIO = 0.6  # 60% validation / 40% test
 TOP_N = 10
 
 COMMISSION_TYPE = "percent"  # "percent" o "fixed"
-COMMISSION_VALUE = 0.0019  # 0.19% o importo fisso
+COMMISSION_VALUE = 0.002  # 0.2% commissioni
+# COMMISSION_TYPE = "fixed"  # "percent" o "fixed"
+# COMMISSION_VALUE = 0  # no commissioni
 
 VALIDATION_RESULTS_FILE = "validation_results.csv"
 
@@ -116,8 +118,8 @@ def run_backtest(df):
 
     # Posizione
     df["position"] = 0
-    df.loc[df["zscore"] < -ZSCORE_THRESHOLD, "position"] = 1
-    df.loc[df["zscore"] > ZSCORE_THRESHOLD, "position"] = -1
+    df.loc[df["zscore"] < -ZSCORE_THRESHOLD, "position"] = 1 # LONG
+    df.loc[df["zscore"] > ZSCORE_THRESHOLD, "position"] = -1 # SHORT
     df["position"] = df["position"].replace(0, np.nan).ffill().fillna(0)
 
     # Differenza posizione -> numero ordini
@@ -164,7 +166,7 @@ def compute_metrics(df, interval):
     - skewness: asimmetria della distribuzione dei ritorni. Negativo → rischio di code lunghe verso perdite estreme; positivo → code verso guadagni.
     - turnover: Numero medio di trade o variazione di posizione. Indica quanto la strategia scambia spesso e impatta costi di commissione.
     - volatility: Deviazione standard dei ritorni annualizzata. Misura quanto sono oscillanti i prezzi (rischio di mercato).
-    - pnl_rolling_4w: Numero medio di trade o variazione di posizione. Indica quanto la strategia scambia spesso e impatta costi di commissione.
+    - pnl_4w: Profitto o perdita totale negli ultimi 4 settimane.
     - total_trades: numero totale di trades effettuati
    """
     pnl = df["equity"].iloc[-1] - INITIAL_CAPITAL
@@ -186,7 +188,8 @@ def compute_metrics(df, interval):
     volatility = df["returns"].std() * np.sqrt(factor)
 
     n_bars = bars_in_4_weeks(interval)
-    rolling_pnl_4w = df["strategy_returns"].rolling(n_bars).sum().mean()
+    pnl_4w = df.tail(n_bars)["strategy_returns"].sum()
+    pnl_last_200_bars = df.tail(200)["strategy_returns"].sum()
 
     return {
         "pnl": pnl,
@@ -197,7 +200,8 @@ def compute_metrics(df, interval):
         "turnover": turnover,
         "total_trades": total_trades,
         "volatility": volatility,
-        "pnl_rolling_4w": rolling_pnl_4w,
+        "pnl_4w": pnl_4w,
+        "pnl_last_200_bars": pnl_last_200_bars
     }
 
 
@@ -210,10 +214,10 @@ def run_validation():
 
     for idx, table in enumerate(tables):
         print(f"Validating table {idx + 1}/{len(tables)}: {table}")
-        df = load_data(DB_PATH, table)
-        if len(df) < 100:
+        df_table = load_data(DB_PATH, table)
+        if len(df_table) < 100:
             continue
-        val, _ = split_validation_test(df, VALIDATION_RATIO)
+        val, _ = split_validation_test(df_table, VALIDATION_RATIO)
         bt = run_backtest(val)
         interval = extract_interval_from_table(table)
         metrics = compute_metrics(bt, interval)
@@ -249,7 +253,7 @@ def select_top_n_with_zscore_and_weights(df, top_n, weights):
             "skewness": 0.05,
             "volatility": 0.05,
             "turnover": 0.05,
-            "pnl_rolling_4w": 0.05
+            "pnl_4w": 0.05
         }
 
     Restituisce:
@@ -262,7 +266,7 @@ def select_top_n_with_zscore_and_weights(df, top_n, weights):
     #     weights = {
     #         "sharpe": 0.3,
     #         "total_trades": 0.2,
-    #         "pnl_rolling_4w": 0.1,
+    #         "pnl_4w": 0.1,
     #         "win_rate": 0.1,
     #         "max_drawdown": 0.1,
     #         "volatility": 0.1,
@@ -935,11 +939,11 @@ def filter_by_thresholds(df, rules):
     return df[mask].copy()
 
 
-def add_weighted_score(df, auc_map):
+def add_weighted_score(df, m_priority_map):
     # df = df.copy()
     score = pd.Series(0.0, index=df.index)
 
-    for metric, auc in auc_map.items():
+    for metric, priority in m_priority_map.items():
         values = df[metric]
 
         # z-score cross-sectional
@@ -949,13 +953,13 @@ def add_weighted_score(df, auc_map):
         if metric in {"volatility"}:
             z = -z
 
-        score += auc * z
+        score += priority * z
 
     df["score"] = score
     return df
 
 
-def get_selected_ranked_tickers(validation_df, filter_rules, auc_map, top_n=None):
+def get_selected_ranked_tickers(validation_df, filter_rules, metric_priority_map, top_n=None):
     # 1. filtro hard
     filtered = filter_by_thresholds(validation_df, filter_rules)
 
@@ -963,7 +967,7 @@ def get_selected_ranked_tickers(validation_df, filter_rules, auc_map, top_n=None
         raise ValueError("Nessun ticker soddisfa i criteri")
 
     # 2. ranking pesato
-    ranked = add_weighted_score(filtered, auc_map)
+    ranked = add_weighted_score(filtered, metric_priority_map)
 
     ranked = ranked.sort_values("score", ascending=False)
 
@@ -977,7 +981,7 @@ def get_selected_ranked_tickers(validation_df, filter_rules, auc_map, top_n=None
 # WORKFLOW
 # =========================
 # 1. Validation (una volta)
-# validation_df = run_validation()
+validation_df = run_validation()
 
 # 1. Carico metriche di validation
 validation_df = load_validation_results()
@@ -987,11 +991,12 @@ validation_df = load_validation_results()
 metrics_weights = {
     "sharpe": 0.3,
     "total_trades": 0.2,
-    "pnl_rolling_4w": 0.1,
+    "pnl_4w": 0.1,
     "win_rate": 0.1,
     "max_drawdown": 0.1,
     "volatility": 0.1,
     "skewness": 0.05,
+    "pnl_last_200_bars": 0.05,
     # "turnover": 0.05,
     # "pnl": 0.0,
 }
@@ -1005,11 +1010,11 @@ metrics_weights = {
 # )
 
 # plot_all_metrics_youden_stacked_cols(validation_df, metrics_weights.keys())
-plot_all_metrics_youden_interactive(
-    validation_df,
-    metrics_weights.keys(),
-    cols=3
-)
+# plot_all_metrics_youden_interactive(
+#     validation_df,
+#     metrics_weights.keys(),
+#     cols=3
+# )
 
 # for metric in metrics_weights.keys():
 #     plot_metric_with_youden(validation_df, metric)
@@ -1035,8 +1040,16 @@ FILTER_RULES = {
         "threshold": 0.0081,
         "direction": ">"
     },
-    "pnl_rolling_4w": {
-        "threshold": 70,
+    "pnl_4w": {
+        "threshold": 0,
+        "direction": ">"
+    },
+    "pnl_last_200_bars": {
+        "threshold": 0,
+        "direction": ">"
+    },
+    "win_rate": {
+        "threshold": 0.5,
         "direction": ">"
     },
     "max_drawdown": {
@@ -1053,18 +1066,20 @@ FILTER_RULES = {
     }
 }
 
-METRIC_AUC = {
-    "sharpe": 1.00,
-    "pnl_rolling_4w": 0.95,
-    "max_drawdown": 0.76,
-    "skewness": 0.72,
-    "volatility": 0.62
+METRIC_PRIORITY = {
+    # "sharpe": 1.00,
+    "pnl_last_200_bars": 0.99,
+    "win_rate" : 0.80,
+    # "pnl_4w": 0.50,
+    # "max_drawdown": 0.76,
+    # "skewness": 0.72,
+    # "volatility": 0.62
 }
 
 top_selected_df = get_selected_ranked_tickers(
     validation_df=validation_df,
     filter_rules=FILTER_RULES,
-    auc_map=METRIC_AUC,
+    metric_priority_map=METRIC_PRIORITY,
     # top_n=10
 )
 
