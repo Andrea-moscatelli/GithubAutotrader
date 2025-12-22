@@ -101,13 +101,12 @@ def bars_in_4_weeks(interval: str) -> int:
 # =========================
 # BACKTEST ENGINE
 # =========================
-def run_backtest(df):
+def run_backtest(df, max_trades=None):
     df = df.copy()
 
     # Z-score
     df["mean"] = df["close"].rolling(ROLLING_WINDOW).mean()
     df["std"] = df["close"].rolling(ROLLING_WINDOW).std()
-    # df.loc[df["std"] == 0, "std"] = np.nan
     # df["zscore"] = (df["close"] - df["mean"]) / df["std"]
 
     df["zscore"] = np.where(
@@ -122,20 +121,35 @@ def run_backtest(df):
     df.loc[df["zscore"] > ZSCORE_THRESHOLD, "position"] = -1 # SHORT
     df["position"] = df["position"].replace(0, np.nan).ffill().fillna(0)
 
-    # Differenza posizione -> numero ordini
+    # Differenza posizione -> numero ordini -> -2/+2 per switch da long a short e viceversa e -1/+1 per chiusura/apertura posizione
     df["trades"] = df["position"].diff().fillna(0)
-    # valore negoziato = |Δposition| * INITIAL_CAPITAL => ad ogni trade investo INITIAL_CAPITAL
+
+    # LIMITAZIONE A N TRADE //TODO errore nel calcolo dei trades visto che trades pùo essere anche +/-2 e nel calcolo delle commissioni dell'ultima posizione dato che si conta come 1 trade anche quando è +/-2
+    if max_trades is not None:
+        trade_indices = df.index[df["trades"] != 0]
+
+        if len(trade_indices) > max_trades:
+            cutoff_idx = trade_indices[max_trades - 1]
+
+            # dopo il trade N-esimo → posizione zero
+            df.loc[df.index > cutoff_idx, "position"] = 0
+
+            # ricalcolo trades coerenti
+            df["trades"] = df["position"].diff().fillna(0)
+
     df["traded_value"] = df["trades"].abs() * INITIAL_CAPITAL
 
     # Commissioni
     if COMMISSION_TYPE == "percent":
         df["commission"] = df["traded_value"] * COMMISSION_VALUE
     elif COMMISSION_TYPE == "fixed":
-        df["commission"] = df["traded_value"].apply(lambda x: COMMISSION_VALUE if x > 0 else 0)
+        df["commission"] = df["traded_value"].apply(
+            lambda x: COMMISSION_VALUE if x > 0 else 0
+        )
     else:
         df["commission"] = 0.0
 
-    # Ritorni giornalieri
+    # Ritorni per bar
     df["returns"] = df["close"].pct_change()
 
     # Guadagno/Perdita in € reale
@@ -299,23 +313,23 @@ def select_top_n_with_zscore_and_weights(df, top_n, weights):
 # =========================
 # TEST
 # =========================
-def run_test_on_selected(tables):
-    results = []
+# def run_test_on_selected(tables):
+#     results = []
+#
+#     for table in tables:
+#         df = load_data(DB_PATH, table)
+#         _, test = split_validation_test(df, VALIDATION_RATIO)
+#         bt = run_backtest(test)
+#         pnl = bt["equity"].iloc[-1] - INITIAL_CAPITAL
+#         results.append({
+#             "table": table,
+#             "test_pnl": pnl
+#         })
+#
+#     return pd.DataFrame(results)
 
-    for table in tables:
-        df = load_data(DB_PATH, table)
-        _, test = split_validation_test(df, VALIDATION_RATIO)
-        bt = run_backtest(test)
-        pnl = bt["equity"].iloc[-1] - INITIAL_CAPITAL
-        results.append({
-            "table": table,
-            "test_pnl": pnl
-        })
 
-    return pd.DataFrame(results)
-
-
-def run_test_all_tables(db_path, validation_ratio):
+def run_test_all_tables(db_path, validation_ratio, max_trades=None):
     tables = get_all_tables(db_path)
     results = []
 
@@ -326,7 +340,7 @@ def run_test_all_tables(db_path, validation_ratio):
             continue
 
         _, test = split_validation_test(df, validation_ratio)
-        bt = run_backtest(test)
+        bt = run_backtest(test, max_trades)
 
         pnl = bt["equity"].iloc[-1] - INITIAL_CAPITAL
 
@@ -338,9 +352,9 @@ def run_test_all_tables(db_path, validation_ratio):
     return pd.DataFrame(results)
 
 
-def portfolio_pnl_from_selection(test_results_df, selected_tables):
-    portfolio = test_results_df[
-        test_results_df["table"].isin(selected_tables)
+def portfolio_pnl_from_selection(df_to_consider, selected_tables):
+    portfolio = df_to_consider[
+        df_to_consider["table"].isin(selected_tables)
     ]
 
     portfolio_df = portfolio.sort_values("test_pnl", ascending=False).filter(items=["table", "test_pnl"]).reset_index(
@@ -369,12 +383,12 @@ def attach_validation_metrics(real_top_n_df, validation_df):
     )
 
 
-def portfolio_stats(test_results_df, tables):
+def portfolio_stats(df_to_consider, tables):
     """
     Calcola statistiche di portafoglio dato un insieme di tabelle.
     Ogni tabella investe INITIAL_CAPITAL.
     """
-    df = test_results_df[test_results_df["table"].isin(tables)]
+    df = df_to_consider[df_to_consider["table"].isin(tables)]
 
     return {
         "num_assets": len(df),
@@ -1036,14 +1050,14 @@ metrics_weights = {
 # )
 
 FILTER_RULES = {
-    "sharpe": {
-        "threshold": 0.0081,
-        "direction": ">"
-    },
-    "pnl_4w": {
-        "threshold": 0,
-        "direction": ">"
-    },
+    # "sharpe": {
+    #     "threshold": 0.0081,
+    #     "direction": ">"
+    # },
+    # "pnl_4w": {
+    #     "threshold": 0,
+    #     "direction": ">"
+    # },
     "pnl_last_200_bars": {
         "threshold": 0,
         "direction": ">"
@@ -1052,18 +1066,18 @@ FILTER_RULES = {
         "threshold": 0.5,
         "direction": ">"
     },
-    "max_drawdown": {
-        "threshold": -0.2,
-        "direction": ">"
-    },
-    "skewness": {
-        "threshold": -0.177,
-        "direction": ">"
-    },
-    "volatility": {
-        "threshold": 0.51,
-        "direction": "<"
-    }
+    # "max_drawdown": {
+    #     "threshold": -0.2,
+    #     "direction": ">"
+    # },
+    # "skewness": {
+    #     "threshold": -0.177,
+    #     "direction": ">"
+    # },
+    # "volatility": {
+    #     "threshold": 0.51,
+    #     "direction": "<"
+    # }
 }
 
 METRIC_PRIORITY = {
@@ -1090,7 +1104,7 @@ top_selected_tables = top_selected_df["table"].tolist()
 print(f"✅ Selezionate {selected_counter} azioni per il test.")
 
 # 3. Test su TUTTE le azioni
-test_results_all = run_test_all_tables(DB_PATH, VALIDATION_RATIO)
+test_results_all = run_test_all_tables(DB_PATH, VALIDATION_RATIO, max_trades=2)
 
 # 4. PnL portafoglio selezionato
 selected_portfolio = portfolio_pnl_from_selection(
@@ -1139,7 +1153,7 @@ print(
 )
 
 selected_portfolio_stats = portfolio_stats(
-    test_results_df=test_results_all,
+    df_to_consider=test_results_all,
     tables=top_selected_tables
 )
 
@@ -1150,7 +1164,7 @@ for k, v in selected_portfolio_stats.items():
 real_top_n_tables = real_top_n_test["df"]["table"].tolist()
 
 oracle_portfolio_stats = portfolio_stats(
-    test_results_df=test_results_all,
+    df_to_consider=test_results_all,
     tables=real_top_n_tables
 )
 
