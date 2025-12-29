@@ -7,6 +7,9 @@ from plotly.subplots import make_subplots
 from sklearn.metrics import roc_curve, roc_auc_score
 import numpy as np
 import math
+from matplotlib.widgets import Button
+
+from src.strategies.WalkForwardInspector import WalkForwardInspector
 
 DB_PATH = "../../data/db/italian_stocks.db"
 INITIAL_CAPITAL = 100_000  # capitale allocato PER AZIONE
@@ -15,14 +18,14 @@ ROLLING_WINDOW = 20
 ZSCORE_THRESHOLD = 2.0
 
 VALIDATION_RATIO = 0.6  # 60% validation / 40% test
-TOP_N = 10
+# TOP_N = 10
 
 # =========================
 # CONDIZIONI DI USCITA (COMBINATE IN 'OR' SE NON SONO None)
 # =========================
 EXIT_ZCORE_ZERO = True
 EXIT_MA_AT_ENTRY = True
-STOP_LOSS_PCT = None  # 0.05  # 5%
+STOP_LOSS_PCT = 0.05  # 0.05  # 5%
 STOP_LOSS_TIME_BARS = None  # 100
 TRAILING_STOP_PCT = None  # 0.03  # 3%
 # =========================
@@ -33,6 +36,24 @@ COMMISSION_VALUE = 0.002  # 0.2% commissioni
 # COMMISSION_VALUE = 0  # no commissioni
 
 VALIDATION_RESULTS_FILE = "validation_results.csv"
+
+def inspect_walk_forward(wf_results):
+    for i, wf in wf_results.iterrows():
+        print(f"\n=== WALK-FORWARD TEST WINDOW {i} when start bar is {wf_results['start_bar'][i]} ===")
+
+        if wf["selected_tables"] is None or len(wf["selected_tables"]) == 0:
+            print("Nessuna tabella selezionata in questa finestra.")
+            continue
+
+        test_bts = wf["test_backtests"]
+        selected_bt = {k: v for k, v in test_bts.items() if k in wf["selected_tables"]}
+        oracle_bt = {k: v for k, v in test_bts.items() if k in wf["oracle_tables"]}
+
+        print("Selected portfolio")
+        browse_portfolio(selected_bt, "SELECTED PORTFOLIO")
+
+        print("Oracle portfolio")
+        browse_portfolio(oracle_bt, "ORACLE PORTFOLIO")
 
 
 # =========================
@@ -58,11 +79,6 @@ def load_data(db_path, table):
     conn.close()
     df.set_index("datetime", inplace=True)
     return df
-
-
-def split_validation_test(df, ratio):
-    split = int(len(df) * ratio)
-    return df.iloc[:split].copy(), df.iloc[split:].copy()
 
 
 def extract_interval_from_table(table_name: str) -> str:
@@ -194,8 +210,8 @@ def run_backtest_zscore(
 
             # 2️⃣ MA raggiunge prezzo di ingresso
             if exit_ma_at_entry and (
-                    (position == 1 and mean >= entry_price)
-                    or (position == -1 and mean <= entry_price)
+                    (position == 1 and mean <= entry_price)
+                    or (position == -1 and mean >= entry_price)
             ):
                 exit_signal = True
 
@@ -382,101 +398,32 @@ def compute_metrics(df, initial_capital, interval):
     }
 
 
-# =========================
-# VALIDATION
-# =========================
-def run_validation():
-    tables = get_all_tables(DB_PATH)
-    # prendi solo le tablelle che hanno "1h" nel nome
-    tables = [t for t in tables if "1h" in t]
-
-    results = []
-
-    for idx, table in enumerate(tables):
-        print(f"Validating table {idx + 1}/{len(tables)}: {table}")
-        df_table = load_data(DB_PATH, table)
-        if len(df_table) < 100:
-            continue
-        val, _ = split_validation_test(df_table, VALIDATION_RATIO)
-        bt = run_backtest_zscore(df=val,
-                                 rolling_window=ROLLING_WINDOW,
-                                 zscore_threshold=ZSCORE_THRESHOLD,
-                                 initial_capital=INITIAL_CAPITAL,
-                                 commission_type=COMMISSION_TYPE,
-                                 commission_value=COMMISSION_VALUE,
-                                 max_trades=None,
-                                 exit_zscore_zero=EXIT_ZCORE_ZERO,
-                                 exit_ma_at_entry=EXIT_MA_AT_ENTRY,
-                                 stop_loss_pct=STOP_LOSS_PCT,
-                                 time_stop_bars=STOP_LOSS_TIME_BARS,
-                                 trailing_stop_pct=TRAILING_STOP_PCT)
-
-        interval = extract_interval_from_table(table)
-        metrics = compute_metrics(df=bt, initial_capital=INITIAL_CAPITAL, interval=interval)
-        metrics["table"] = table
-        results.append(metrics)
-
-    results_df = pd.DataFrame(results)
-    results_df.to_csv(VALIDATION_RESULTS_FILE, index=False)
-    return results_df
-
 
 def load_validation_results():
     return pd.read_csv(VALIDATION_RESULTS_FILE)
 
 
-def run_test_all_tables(db_path, validation_ratio, max_trades=None):
-    tables = get_all_tables(db_path)
-    results = []
-
-    for idx, table in enumerate(tables):
-        print(f"Test table {idx + 1}/{len(tables)}: {table}")
-        df = load_data(db_path, table)
-        if len(df) < 100:
-            continue
-
-        _, test = split_validation_test(df, validation_ratio)
-        bt = run_backtest(test, max_trades)
-
-        pnl = bt["equity"].iloc[-1] - INITIAL_CAPITAL
-
-        results.append({
-            "table": table,
-            "test_pnl": pnl
-        })
-
-    return pd.DataFrame(results)
-
-
-def portfolio_pnl_from_selection(df_to_consider, selected_tables):
-    portfolio = df_to_consider[
-        df_to_consider["table"].isin(selected_tables)
-    ]
-
-    portfolio_df = portfolio.sort_values("test_pnl", ascending=False).filter(items=["table", "test_pnl"]).reset_index(
-        drop=True)
-    return {"df": portfolio_df,
-            "total_pnl": portfolio_df["test_pnl"].sum(),
-            "avg_pnl": portfolio_df["test_pnl"].mean()
-            }
-
-
-def get_real_top_n_test(test_results_df, n):
-    top_df = test_results_df.sort_values("test_pnl", ascending=False).head(n).reset_index(drop=True)
-
-    return {"df": top_df,
-            "total_pnl": top_df["test_pnl"].sum(),
-            "avg_pnl": top_df["test_pnl"].mean()
-            }
-
-
-def attach_validation_metrics(real_top_n_df, validation_df):
-    return real_top_n_df.merge(
-        validation_df,
-        on="table",
-        how="left",
-        suffixes=("_test", "_validation")
-    )
+# def run_test_all_tables(db_path, validation_ratio, max_trades=None):
+#     tables = get_all_tables(db_path)
+#     results = []
+#
+#     for idx, table in enumerate(tables):
+#         print(f"Test table {idx + 1}/{len(tables)}: {table}")
+#         df = load_data(db_path, table)
+#         if len(df) < 100:
+#             continue
+#
+#         _, test = split_validation_test(df, validation_ratio)
+#         bt = run_backtest(test, max_trades)
+#
+#         pnl = bt["equity"].iloc[-1] - INITIAL_CAPITAL
+#
+#         results.append({
+#             "table": table,
+#             "test_pnl": pnl
+#         })
+#
+#     return pd.DataFrame(results)
 
 
 def portfolio_stats(df_to_consider, tables):
@@ -491,7 +438,7 @@ def portfolio_stats(df_to_consider, tables):
         "num_assets": len(df),
         "total_pnl": df["test_pnl"].sum(),
         "avg_pnl": df["test_pnl"].mean(),
-        "positive_ratio": (df["test_pnl"] > 0).mean()
+        "positive_assets_ratio": (df["test_pnl"] > 0).mean()
     }
 
 
@@ -528,7 +475,7 @@ def filter_by_thresholds(df, rules):
 
 
 def add_weighted_score(df, m_priority_map):
-    # df = df.copy()
+    df = df.copy()
     score = pd.Series(0.0, index=df.index)
 
     for metric, priority in m_priority_map.items():
@@ -552,7 +499,8 @@ def get_selected_ranked_tickers(validation_df, filter_rules, metric_priority_map
     filtered = filter_by_thresholds(validation_df, filter_rules)
 
     if filtered.empty:
-        raise ValueError("Nessun ticker soddisfa i criteri")
+        print("Nessun ticker soddisfa i criteri")
+        return filtered
 
     # 2. ranking pesato
     ranked = add_weighted_score(filtered, metric_priority_map)
@@ -565,187 +513,238 @@ def get_selected_ranked_tickers(validation_df, filter_rules, metric_priority_map
     return ranked
 
 
-# =========================
-# WORKFLOW
-# =========================
-# 1. Validation (una volta)
-validation_df = run_validation()
+def run_walk_forward(
+        db_path,
+        validation_bars,
+        test_bars,
+        top_n,
+):
+    tables = [t for t in get_all_tables(db_path) if "1h" in t]
 
-# 1. Carico metriche di validation
-validation_df = load_validation_results()
+    # TODO: limitazione di test
+    # tables = tables[: 20]  # per testare più velocemente
+    # tables = ["t_1ADS_MI_1h"]
 
-metrics_weights = {
-    "sharpe": 0.3,
-    "total_trades": 0.2,
-    "pnl_4w": 0.1,
-    "win_rate": 0.1,
-    "max_drawdown": 0.1,
-    "volatility": 0.1,
-    "skewness": 0.05,
-    "pnl_last_200_bars": 0.05,
-    # "turnover": 0.05,
-    # "pnl": 0.0,
-}
+    print("Loading data...")
+    data = {t: load_data(db_path, t) for t in tables}
 
-# plot_roc_grid_validation(
-#     validation_df=validation_df,
-#     metrics=metrics_weights.keys()
-# )
+    start = 0
+    wf_results = []
 
-# plot_all_metrics_youden_stacked_cols(validation_df, metrics_weights.keys())
-# plot_all_metrics_youden_interactive(
-#     validation_df,
-#     metrics_weights.keys(),
-#     cols=3
-# )
+    # limite massimo raggiungibile (ticker più lungo)
+    max_len = max(len(df) for df in data.values())
 
-# for metric in metrics_weights.keys():
-#     plot_metric_with_youden(validation_df, metric)
+    while start + validation_bars + test_bars <= max_len:
+        print(f"\n=== WALK-FORWARD WINDOW starting at bar {start} ===")
 
-# exit()
+        validation_metrics = []
+        test_results = []
 
-# roc_results = roc_analysis_validation(
-#     validation_df=validation_df,
-#     metrics=metrics_weights.keys()
-# )
+        # =========================
+        # SELEZIONE TICKER VALIDI
+        # =========================
+        valid_tables = [
+            t for t, df in data.items()
+            if len(df) >= start + validation_bars + test_bars
+        ]
 
-# print("ROC RESULTS: \n", roc_results)
+        # if len(valid_tables) < top_n:
+        #     print("Not enough valid tickers for this window, stopping WF.")
+        #     break
 
-# 2. Selezione TOP N ex-ante (con ranking avanzato)
-# top_n_selected = select_top_n_with_zscore_and_weights(
-#     validation_df,
-#     top_n=TOP_N,
-#     weights=metrics_weights
-# )
+        print(f"Valid tickers in this window: {len(valid_tables)}")
+
+        # =========================
+        # VALIDATION
+        # =========================
+        for idx, table in enumerate(valid_tables):
+            df = data[table]
+
+            if idx % 50 == 0:
+                print(f"Validating table: {table} ({idx + 1}/{len(valid_tables)})")
+
+            val = df.iloc[start : start + validation_bars]
+
+            bt_val = run_backtest_zscore(
+                val,
+                rolling_window=ROLLING_WINDOW,
+                zscore_threshold=ZSCORE_THRESHOLD,
+                initial_capital=INITIAL_CAPITAL,
+                commission_type=COMMISSION_TYPE,
+                commission_value=COMMISSION_VALUE,
+                exit_zscore_zero=EXIT_ZCORE_ZERO,
+                exit_ma_at_entry=EXIT_MA_AT_ENTRY,
+                stop_loss_pct=STOP_LOSS_PCT,
+                time_stop_bars=STOP_LOSS_TIME_BARS,
+                trailing_stop_pct=TRAILING_STOP_PCT,
+            )
+
+            interval = extract_interval_from_table(table)
+            m = compute_metrics(bt_val, INITIAL_CAPITAL, interval)
+            m["table"] = table
+            validation_metrics.append(m)
+
+        val_df = pd.DataFrame(validation_metrics)
+
+        # =========================
+        # SELEZIONE EX-ANTE
+        # =========================
+        selected = get_selected_ranked_tickers(
+            validation_df=val_df,
+            filter_rules=FILTER_RULES,
+            metric_priority_map=METRIC_PRIORITY_MAP,
+            top_n=top_n,
+        )
+
+        selected_tables = selected["table"].tolist()
+        print(f"Selected {len(selected_tables)} tables for testing.")
+
+        # =========================
+        # TEST
+        # =========================
+
+        bt_test_dict = {}
+        for idx_table, table in enumerate(valid_tables):
+            if idx_table % 50 == 0:
+                print(f"Testing table: {table} ({idx_table + 1}/{len(valid_tables)})")
+
+            df = data[table]
+
+            test = df.iloc[
+                start + validation_bars :
+                start + validation_bars + test_bars
+            ]
+
+            bt_test = run_backtest_zscore(
+                test,
+                rolling_window=ROLLING_WINDOW,
+                zscore_threshold=ZSCORE_THRESHOLD,
+                initial_capital=INITIAL_CAPITAL,
+                commission_type=COMMISSION_TYPE,
+                commission_value=COMMISSION_VALUE,
+                exit_zscore_zero=EXIT_ZCORE_ZERO,
+                exit_ma_at_entry=EXIT_MA_AT_ENTRY,
+                stop_loss_pct=STOP_LOSS_PCT,
+                time_stop_bars=STOP_LOSS_TIME_BARS,
+                trailing_stop_pct=TRAILING_STOP_PCT,
+            )
+
+            pnl = bt_test["equity"].iloc[-1] - INITIAL_CAPITAL
+            test_results.append({"table": table, "test_pnl": pnl})
+            # if table in selected_tables:
+            bt_test_dict[table] = bt_test
+
+        test_df = pd.DataFrame(test_results)
+
+        # =========================
+        # PORTAFOGLI
+        # =========================
+        selected_port = portfolio_stats(test_df, selected_tables)
+
+        oracle_tables = (
+            test_df
+            .sort_values("test_pnl", ascending=False)["table"]
+            .tolist()
+        )
+
+        oracle_tables = oracle_tables[:len(selected_tables)]
+
+        oracle_port = portfolio_stats(test_df, oracle_tables)
+
+        eff = efficiency_score(selected_port, oracle_port)
+
+        wf_results.append({
+            "start_bar": start,
+            "num_assets": len(valid_tables),
+            "selected_pnl": selected_port["total_pnl"],
+            "oracle_pnl": oracle_port["total_pnl"],
+            "efficiency": eff,
+            "selected_tables": selected_tables,
+            "oracle_tables": oracle_tables,
+            # "selected_test_history": {
+            #     table: bt_test_dict[table]
+            #     for table in selected_tables
+            # },
+            # "oracle_test_history": {
+            #     table: bt_test_dict[table]
+            #     for table in oracle_tables
+            # },
+            "test_backtests": {
+                table: bt_test_dict[table]
+                for table in set(selected_tables + oracle_tables)
+            },
+        })
+
+        print(f"******** Selected portfolio PnL: {selected_port['total_pnl']:.2f}")
+        print(f"******** Oracle portfolio PnL:   {oracle_port['total_pnl']:.2f}")
+        print(f"******** Efficiency ratio:        {eff:.2f}")
+
+        # advance di un periodo di test
+        start += test_bars
+
+        # TODO limitazione test
+        # break
+
+    return pd.DataFrame(wf_results)
+
+
+
+def summarize_walk_forward(wf_df):
+    return {
+        "periods": len(wf_df),
+        "total_selected_pnl": wf_df["selected_pnl"].sum(),
+        "avg_selected_pnl": wf_df["selected_pnl"].mean(),
+        "total_oracle_pnl": wf_df["oracle_pnl"].sum(),
+        "avg_oracle_pnl": wf_df["oracle_pnl"].mean(),
+        "avg_efficiency": wf_df["efficiency"].mean(),
+        "positive_periods_ratio": (wf_df["selected_pnl"] > 0).mean(),
+    }
+
+
+
+
 
 FILTER_RULES = {
-    # "sharpe": {
-    #     "threshold": 0.0081,
-    #     "direction": ">"
-    # },
-    # "pnl_4w": {
-    #     "threshold": 0,
-    #     "direction": ">"
-    # },
-    "pnl_last_200_bars": {
-        "threshold": 0,
-        "direction": ">"
-    },
-    "win_rate": {
-        "threshold": 0.5,
-        "direction": ">"
-    },
-    # "max_drawdown": {
-    #     "threshold": -0.2,
-    #     "direction": ">"
-    # },
-    # "skewness": {
-    #     "threshold": -0.177,
-    #     "direction": ">"
-    # },
-    # "volatility": {
-    #     "threshold": 0.51,
-    #     "direction": "<"
-    # }
+    "expectancy": {"direction": ">", "threshold": 0},
+    "profit_factor": {"direction": ">", "threshold": 1.2},
+    "max_drawdown": {"direction": ">", "threshold": -0.25},
+    "exposure": {"direction": ">", "threshold": 0.05},
 }
 
-METRIC_PRIORITY = {
-    # "sharpe": 1.00,
-    "pnl_last_200_bars": 0.99,
-    "win_rate": 0.80,
-    # "pnl_4w": 0.50,
-    # "max_drawdown": 0.76,
-    # "skewness": 0.72,
-    # "volatility": 0.62
+METRIC_PRIORITY_MAP = {
+    "expectancy": 3.0,
+    "profit_factor": 2.0,
+    "sharpe": 1.5,
+    "sortino": 1.5,
 }
 
-top_selected_df = get_selected_ranked_tickers(
-    validation_df=validation_df,
-    filter_rules=FILTER_RULES,
-    metric_priority_map=METRIC_PRIORITY,
-    # top_n=10
+
+# =========================
+# WALK-FORWARD PARAMS
+# =========================
+VALIDATION_BARS = 252 * 8      # 1 anno ~ hourly
+TEST_BARS = 21 * 8             # 1 mese ~ hourly
+
+
+wf_df = run_walk_forward(
+    db_path=DB_PATH,
+    validation_bars=VALIDATION_BARS,
+    test_bars=TEST_BARS,
+    top_n=None,
 )
 
-selected_counter = len(top_selected_df)
+summary = summarize_walk_forward(wf_df)
 
-top_selected_tables = top_selected_df["table"].tolist()
-
-print(f"✅ Selezionate {selected_counter} azioni per il test.")
-
-# 3. Test su TUTTE le azioni
-test_results_all = run_test_all_tables(DB_PATH, VALIDATION_RATIO, max_trades=2)
-
-# 4. PnL portafoglio selezionato
-selected_portfolio = portfolio_pnl_from_selection(
-    test_results_all,
-    top_selected_tables
-)
-
-# 5. Vere TOP N nel test
-real_top_n_test = get_real_top_n_test(
-    test_results_all,
-    selected_counter
-)
-
-# 6. Metriche di validation delle vere TOP N
-real_top_n_with_validation = attach_validation_metrics(
-    real_top_n_test["df"],
-    validation_df
-)
-
-print("📦 PORTAFOGLIO SELEZIONATO (ex-ante)")
-# aggiungi l'informazione sul ranking che avevano
-print(selected_portfolio["df"].merge(
-    top_selected_df[["table"]].reset_index().rename(columns={"index": "rank"}),
-    on="table",
-    how="left"
-).sort_values("test_pnl", ascending=False))
-print(f"\n💰 PNL TOTALE PORTAFOGLIO SELEZIONATO: {selected_portfolio['total_pnl']:.2f} €")
-print(f"💰 PNL MEDIO PER AZIONE SELEZIONATA: {selected_portfolio['avg_pnl']:.2f} €")
-
-print(f"\n🥇 REALI TOP {selected_counter} NEL TEST (oracle)")
-print(real_top_n_test["df"])
-print(f"\n🥇 PNL TOTALE REALI TOP {selected_counter}: {real_top_n_test['total_pnl']:.2f} €")
-print(f"🥇 PNL MEDIO REALI TOP {selected_counter}: {real_top_n_test['avg_pnl']:.2f} €")
-
-print(f"\n🔍 METRICHE DI VALIDATION DELLE TOP {selected_counter} SELEZIONATE")
-print(
-
-)
-
-print(f"\n🔍 METRICHE DI VALIDATION DELLE REALI TOP {selected_counter}")
-print(
-    real_top_n_with_validation[
-        ["table", "test_pnl", "sharpe", "pnl", "max_drawdown",
-         "skewness"]
-    ]
-)
-
-selected_portfolio_stats = portfolio_stats(
-    df_to_consider=test_results_all,
-    tables=top_selected_tables
-)
-
-print("📦 PORTAFOGLIO TOP N SELEZIONATE (ex-ante)")
-for k, v in selected_portfolio_stats.items():
+print("\n=== WALK-FORWARD SUMMARY ===")
+for k, v in summary.items():
     print(f"{k}: {v}")
 
-real_top_n_tables = real_top_n_test["df"]["table"].tolist()
 
-oracle_portfolio_stats = portfolio_stats(
-    df_to_consider=test_results_all,
-    tables=real_top_n_tables
+
+WalkForwardInspector(
+    wf_df,
+    zscore_threshold=ZSCORE_THRESHOLD,
+    wf_idx=0
 )
+# inspect_walk_forward(wf_df)
 
-print("\n🥇 PORTAFOGLIO TOP N ORACLE (ex-post)")
-for k, v in oracle_portfolio_stats.items():
-    print(f"{k}: {v}")
-
-# Efficiency score
-eff_score = efficiency_score(
-    selected_portfolio_stats,
-    oracle_portfolio_stats
-)
-
-print("\n📊 EFFICIENCY SCORE")
-print(f"Efficiency Score: {eff_score:.2f}")
