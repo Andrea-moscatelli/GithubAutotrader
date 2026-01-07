@@ -9,3 +9,13 @@ Per lanciare il DB plotter, lancia il seguente comando dalla main directory del 
 ```
 streamlit run src/data/db_plotter.py
 ```
+
+
+prossimi passi:
+- FATTO - definire ticks_retriever_interactive_broker.py che raccoglie i dati storici delle azioni italiane e li salva nel db
+- far in modo che tickers.csv abbia la struttura corretta (per ticks_retriever_interactive_broker.py)
+- definire ticks_selector.py che seleziona le migliori X azioni che verranno usate per il live trading
+- definire live_trader.py che esegue il trading in tempo reale sulle azioni selezionate
+- dockerizzare l'intero progetto
+- estendere il progetto ad altri mercati
+

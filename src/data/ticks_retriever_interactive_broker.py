@@ -37,8 +37,8 @@ ROME_TZ = pytz.timezone("Europe/Rome")
 def db_path(data_folder: str) -> str:
     return os.path.join(data_folder, DB_NAME)
 
-def bars_table(exchange: str, interval: str) -> str:
-    return f"bars_{exchange}_{interval}"
+def bars_table(conId: int, interval: str) -> str:
+    return f"bars_{interval}_{conId}"
 
 # =========================
 # DB INIT
@@ -67,7 +67,7 @@ def ensure_db(data_folder: str) -> bool:
             currency TEXT,
             secType TEXT,
             localSymbol TEXT,
-            UNIQUE(symbol, exchange, currency)
+            UNIQUE(symbol, primaryExchange, secType, currency)
         )
     """)
 
@@ -122,34 +122,33 @@ def upsert_instrument(contract, data_folder: str):
 # BARS TABLE
 # =========================
 
-def ensure_bars_table(exchange: str, interval: str, data_folder: str):
-    table = bars_table(exchange, interval)
+def ensure_bars_table(conId: int, interval:str, data_folder: str):
+    table = bars_table(conId=conId, interval=interval)
     conn = sqlite3.connect(db_path(data_folder))
     c = conn.cursor()
 
     c.execute(f"""
         CREATE TABLE IF NOT EXISTS {table} (
-            conId INTEGER,
             datetime TEXT,
             open REAL,
             high REAL,
             low REAL,
             close REAL,
             volume INTEGER,
-            PRIMARY KEY (conId, datetime)
+            PRIMARY KEY (datetime)
         )
     """)
 
     c.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table}_conId_dt
-        ON {table} (conId, datetime)
+        CREATE INDEX IF NOT EXISTS idx_{table}_dt
+        ON {table} (datetime)
     """)
 
     conn.commit()
     conn.close()
 
-def last_bar_timestamp(conId: int, exchange: str, interval: str, data_folder: str):
-    table = bars_table(exchange, interval)
+def last_bar_timestamp(conId: int, interval: str, data_folder: str):
+    table = bars_table(conId=conId, interval=interval)
     conn = sqlite3.connect(db_path(data_folder))
     c = conn.cursor()
     try:
@@ -164,16 +163,16 @@ def last_bar_timestamp(conId: int, exchange: str, interval: str, data_folder: st
     conn.close()
     return pd.to_datetime(v, utc=True) if v else None
 
-def insert_bars(df: pd.DataFrame, conId: int, exchange: str, interval: str, data_folder: str):
+
+def insert_bars(df: pd.DataFrame, conId: int, interval: str, data_folder: str):
     if df.empty:
         return
 
-    ensure_bars_table(exchange, interval, data_folder)
-    table = bars_table(exchange, interval)
+    ensure_bars_table(conId, interval, data_folder)
+    table = bars_table(conId=conId, interval=interval)
 
     rows = [
         (
-            conId,
             r["datetime"].isoformat(),
             float(r["open"]),
             float(r["high"]),
@@ -188,7 +187,7 @@ def insert_bars(df: pd.DataFrame, conId: int, exchange: str, interval: str, data
     c = conn.cursor()
     c.executemany(
         f"""INSERT OR IGNORE INTO {table}
-            (conId, datetime, open, high, low, close, volume)
+            (datetime, open, high, low, close, volume)
             VALUES (?,?,?,?,?,?,?)""",
         rows
     )
@@ -230,6 +229,7 @@ def invalid_conIds(data_folder: str) -> set[int]:
 # =========================
 
 def last_processed_conId(data_folder: str):
+    # TODO rivedere logica per ripartire da dove si è arrivati
     conn = sqlite3.connect(db_path(data_folder))
     c = conn.cursor()
     c.execute("SELECT last_conId FROM run_state WHERE id=1")
@@ -360,7 +360,7 @@ def main(data_folder: str):
 
             if not is_first_run:
                 last_ts = last_bar_timestamp(
-                    conId, contract.exchange, INTERVAL, data_folder
+                    conId=conId, interval=INTERVAL, data_folder=data_folder
                 )
                 if last_ts:
                     start = last_ts + timedelta(minutes=INTERVAL_MINS)
@@ -372,7 +372,7 @@ def main(data_folder: str):
                 continue
 
             if df is not None and not df.empty:
-                insert_bars(df, conId, contract.exchange, INTERVAL, data_folder)
+                insert_bars(df=df, conId=conId, interval=INTERVAL, data_folder=data_folder)
                 set_ticker_status(
                     conId, contract.symbol, contract.exchange,
                     "VALID", f"{len(df)} bars", data_folder
