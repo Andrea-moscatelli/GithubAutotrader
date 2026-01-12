@@ -397,6 +397,46 @@ def upsert_ticker_data(ticker: str, is_first_run: bool, db_folder, day_to_retrie
     return True
 
 
+def save_tickers_for_IB(
+        db_folder: str,
+        input_csv: str,
+        output_csv: str,
+        exchange: str = "BVME",
+        currency: str = "EUR",
+        primary_exchange: str = "BVME",
+):
+    input_path = os.path.join(db_folder, input_csv)
+    output_path = os.path.join(db_folder, "..", "tickers", output_csv)
+
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"File non trovato: {input_path}")
+
+    df = pd.read_csv(input_path)
+
+    if "symbol" not in df.columns:
+        raise ValueError("Il CSV di input deve contenere la colonna 'symbol'")
+
+    # Normalizzazione simboli (rimuove .MI)
+    df["symbol"] = (
+        df["symbol"]
+        .astype(str)
+        .str.strip()
+        .str.replace(".MI", "", regex=False)
+    )
+
+    # Aggiunge colonne IB
+    df["exchange"] = exchange
+    df["currency"] = currency
+    df["primaryExchange"] = primary_exchange
+
+    # Riordina colonne
+    df = df[["symbol", "exchange", "currency", "primaryExchange"]]
+
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+    print(f"✅ Convertiti {len(df)} ticker in '{output_path}'")
+
+
 def main(db_folder: str):
     is_first_run = ensure_db(db_folder)
 
@@ -404,6 +444,12 @@ def main(db_folder: str):
     if date.today().day == 1 or not os.path.exists(tickers_file):
         tickers = scrape_milan_stocks(db_folder)
         save_tickers_file(db_folder, tickers)
+        save_tickers_for_IB(
+            db_folder=db_folder,
+            input_csv="milan_tickers.csv",
+            output_csv="milan_tickers_ib.csv"
+        )
+
     else:
         tickers = load_tickers_file(db_folder)
 

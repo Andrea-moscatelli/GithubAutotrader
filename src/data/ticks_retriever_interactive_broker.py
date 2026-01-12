@@ -14,7 +14,7 @@ from ib_insync import IB, Stock, util
 # =========================
 
 DB_NAME = "market_data.db"
-TICKERS_FILE = "tickers.csv"
+TICKERS_FILE = "milan_tickers_for_IB.csv"
 
 INTERVAL_MINS = 30
 INTERVAL = f"{INTERVAL_MINS}m"
@@ -333,7 +333,7 @@ def download_history(
 def main(data_folder: str):
     is_first_run = ensure_db(data_folder)
 
-    tickers = pd.read_csv(os.path.join(data_folder, TICKERS_FILE)).to_dict("records")
+    tickers = pd.read_csv(os.path.join(data_folder, "..", "tickers", TICKERS_FILE)).to_dict("records")
     if not tickers:
         print("⚠️ Nessun ticker")
         return
