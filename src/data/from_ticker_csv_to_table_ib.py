@@ -41,12 +41,12 @@ def init_db():
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS contracts (
-            isin TEXT,
+            conId INTEGER PRIMARY KEY,
             symbol TEXT,
             exchange TEXT,
             primaryExchange TEXT,
             currency TEXT,
-            conId INTEGER PRIMARY KEY,
+            isin TEXT,
             description TEXT,
             market TEXT,
             source_symbol TEXT
@@ -132,7 +132,9 @@ def main():
                     primaryExchange,
                     currency,
                     conId,
+                    localSymbol
                     description,
+                    secType, 
                     market,
                     source_symbol
                 )
@@ -144,7 +146,9 @@ def main():
                 contract.primaryExchange,
                 contract.currency,
                 contract.conId,
+                contract.localSymbol,
                 description,
+                contract.secType,
                 market,
                 symbol
             ))
