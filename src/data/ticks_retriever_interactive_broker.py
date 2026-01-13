@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 import pytz
 from ib_insync import IB, Stock, util
+from pandas import DataFrame
 
 # from src.data.from_ticker_csv_to_table_ib import VALID_MARKETS, DB_PATH as CONTRACTS_DB_PATH
 
@@ -17,23 +18,9 @@ from ib_insync import IB, Stock, util
 # =========================
 
 DB_NAME = "market_data.db"
-TICKERS_FILE = "Euronext_Equities_2026-01-08.csv"
 
-INTERVAL_MINS = 30
-INTERVAL = f"{INTERVAL_MINS}m"
-BAR_SIZE = f"{INTERVAL_MINS} mins"
-
-DAYS_TO_RETRIEVE = 365 * 10
-
-IB_HOST = "127.0.0.1"
-IB_PORT = 4002  # 4001 live / 4002 paper
-IB_CLIENT_ID = 15
-
-RESET = os.environ.get("RESET", "FALSE").upper()
-
-ROME_TZ = pytz.timezone("Europe/Rome")
-
-VALID_MARKETS = {
+ITALIAN_TICKERS_FILE = "Euronext_Equities_2026-01-08.csv"
+VALID_ITALIAN_MARKETS = {
     "Euronext Milan": {
         "exchange": "BVME",
         "primaryExchange": "BVME",
@@ -50,6 +37,20 @@ VALID_MARKETS = {
         "currency": "EUR"
     }
 }
+
+INTERVAL_MINS = 30
+INTERVAL = f"{INTERVAL_MINS}m"
+BAR_SIZE = f"{INTERVAL_MINS} mins"
+
+DAYS_TO_RETRIEVE = 365 * 10
+
+IB_HOST = "127.0.0.1"
+IB_PORT = 4002  # 4001 live / 4002 paper
+IB_CLIENT_ID = 15
+
+RESET = os.environ.get("RESET", "FALSE").upper()
+
+ROME_TZ = pytz.timezone("Europe/Rome")
 
 
 # =========================
@@ -406,14 +407,7 @@ def download_history(
 def main(data_folder: str):
     is_first_run = ensure_db(data_folder)
 
-    # tickers = pd.read_csv(os.path.join(data_folder, "..", "tickers", TICKERS_FILE)).to_dict("records")
-    # if not tickers:
-    #     print("⚠️ Nessun ticker")
-    #     return
-
-    df = pd.read_csv(os.path.join(data_folder, "..", "tickers", TICKERS_FILE), sep=";")
-    df = df[df["Market"].isin(VALID_MARKETS.keys())]
-    df = df.drop_duplicates(subset=["ISIN", "Market"])
+    df = get_italian_tickers(data_folder)
 
     # prendi solo i primi N ticker per test
     df = df.head(20)
@@ -429,31 +423,31 @@ def main(data_folder: str):
         print(f"⚠️ Saltati {len(invalids)} contratti invalidi")
         df = df[~df.apply(
             lambda r: (
-                          r["Symbol"],
-                          VALID_MARKETS[r["Market"]]["exchange"],
-                          VALID_MARKETS[r["Market"]]["primaryExchange"],
-                          VALID_MARKETS[r["Market"]]["currency"]
+                          r["symbol"],
+                          VALID_ITALIAN_MARKETS[r["market"]]["exchange"],
+                          VALID_ITALIAN_MARKETS[r["market"]]["primaryExchange"],
+                          VALID_ITALIAN_MARKETS[r["market"]]["currency"]
                       ) in invalids,
             axis=1
         )]
 
-    last_conId = last_processed_conId(data_folder)
-
+    last_conId = last_processed_conId(data_folder) # per ora non lo uso
+    # name, isin, market, symbol, exchange, primaryExchange, currency
     try:
         for _, row in df.iterrows():
-            isin = row["ISIN"]
-            symbol = row["Symbol"]
-            market = row["Market"]
+            isin = row["isin"]
+            symbol = row["symbol"]
+            market = row["market"]
 
-            cfg = VALID_MARKETS[market]
+            # cfg = VALID_MARKETS[market]
 
             try:
                 result = discover_contract(
                     ib,
                     symbol=symbol,
-                    exchange=cfg["exchange"],
-                    primaryExchange=cfg["primaryExchange"],
-                    currency=cfg["currency"]
+                    exchange=row["exchange"],
+                    primaryExchange=row["primaryExchange"],
+                    currency=row["currency"]
                 )
             except Exception as e:
                 print(f"❌ errore IB: {e}")
@@ -507,6 +501,23 @@ def main(data_folder: str):
         ib.disconnect()
 
     print("🏁 Completato")
+
+
+def get_italian_tickers(data_folder: str) -> DataFrame:
+    df_src = pd.read_csv(os.path.join(data_folder, "..", "tickers", ITALIAN_TICKERS_FILE), sep=";")
+    df_src = df_src[df_src["Market"].isin(VALID_ITALIAN_MARKETS.keys())]
+    df_src = df_src.drop_duplicates(subset=["ISIN", "Market"])
+
+    df = pd.DataFrame({
+        "name": df_src["Name"],
+        "isin": df_src["ISIN"],
+        "market": df_src["Market"],
+        "symbol": df_src["Symbol"],
+        "exchange": df_src["Market"].map(lambda m: VALID_ITALIAN_MARKETS[m]["exchange"]),
+        "primaryExchange": df_src["Market"].map(lambda m: VALID_ITALIAN_MARKETS[m]["primaryExchange"]),
+        "currency": df_src["Market"].map(lambda m: VALID_ITALIAN_MARKETS[m]["currency"]),
+    })
+    return df
 
 
 # =========================

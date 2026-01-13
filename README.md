@@ -16,6 +16,7 @@ prossimi passi:
 - FATTO - far in modo che tickers.csv abbia la struttura corretta (per ticks_retriever_interactive_broker.py)
 - FATTO - integra cio che fa from_ticker_csv_to_table_ib in ticks_retriever_interactive_broker.py
 - FATTO - testa lo script e con i primi 50 tickers e che vengano registrati i contratti invalidi
+- FATTO - rendi modulare l'estrazione di titoli per italia
 - definire ticks_selector.py che seleziona le migliori X azioni che verranno usate per il live trading
 - definire live_trader.py che esegue il trading in tempo reale sulle azioni selezionate
 - dockerizzare l'intero progetto
