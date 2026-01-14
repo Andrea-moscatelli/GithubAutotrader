@@ -18,6 +18,7 @@ prossimi passi:
 - FATTO - testa lo script e con i primi 50 tickers e che vengano registrati i contratti invalidi
 - FATTO - rendi modulare l'estrazione di titoli per italia
 - definire ticks_selector.py che seleziona le migliori X azioni che verranno usate per il live trading
+  - evita di definire filtri hardcodati, ma tira fuori un unico parametro di "rischiosita" che possa essere usato per selezionare i titoli
 - definire live_trader.py che esegue il trading in tempo reale sulle azioni selezionate
 - dockerizzare l'intero progetto
 - estendere il progetto ad altri mercati
