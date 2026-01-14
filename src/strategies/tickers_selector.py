@@ -123,11 +123,11 @@ def run_backtest_zscore(
     # =========================
     df["mean"] = df["close"].rolling(rolling_window).mean()
     df["std"] = df["close"].rolling(rolling_window).std()
-    df["price_avg"] = (df["low"] + df["high"]) / 2
+    # df["price_avg"] = (df["low"] + df["high"]) / 2
 
     df["zscore"] = np.where(
         df["std"] > 0,
-        (df["price_avg"] - df["mean"]) / df["std"],
+        (df["close"] - df["mean"]) / df["std"],
         0.0,
     )
 
@@ -137,7 +137,8 @@ def run_backtest_zscore(
     df["position"] = 0
     df["entry_price"] = np.nan
     df["entry_bar"] = np.nan
-    df["pnl_ptc"] = 0.0
+    df["pnl_pct"] = 0.0
+    df["asset_qty"] = 0
     df["trail_price"] = np.nan
     df["trades"] = 0.0
 
@@ -151,10 +152,7 @@ def run_backtest_zscore(
     # LOOP PRINCIPALE
     # =========================
     for i in range(rolling_window + 1, len(df)):
-        # price = df.iloc[i]["close"]
-        max_price = df.iloc[i]["high"]
-        min_price = df.iloc[i]["low"]
-        avg_price = df.iloc[i]["price_avg"]
+        price = df.iloc[i]["close"]
         z = df.iloc[i]["zscore"]
         mean = df.iloc[i]["mean"]
         pnl_pct = 0.0
@@ -162,25 +160,25 @@ def run_backtest_zscore(
         # =====================
         # ENTRY
         # =====================
-        if position == 0:
-            if z < -zscore_threshold:
-                position = 1  # Entering LONG
-                entry_price = avg_price
-                entry_bar = i
-                trail_price = avg_price
-                trade_count += 1
+        # if position == 0:
+        if z < -zscore_threshold and position in [0, -1]:
+            position = 1  # Entering LONG
+            entry_price = price
+            entry_bar = i
+            trail_price = price
+            trade_count += 1
 
-            elif z > zscore_threshold:
-                position = -1  # Entering SHORT
-                entry_price = price
-                entry_bar = i
-                trail_price = price
-                trade_count += 1
+        elif z > zscore_threshold and position in [0, 1]:
+            position = -1  # Entering SHORT
+            entry_price = price
+            entry_bar = i
+            trail_price = price
+            trade_count += 1
 
         # =====================
         # EXIT
         # =====================
-        else:
+        elif position in [1, -1]:
             holding_bars = i - entry_bar
 
             if position == 1:  # I'm currently LONG
@@ -242,7 +240,7 @@ def run_backtest_zscore(
         df.at[df.index[i], "entry_price"] = entry_price if position != 0 else np.nan
         df.at[df.index[i], "entry_bar"] = entry_bar if position != 0 else np.nan
         df.at[df.index[i], "trail_price"] = trail_price if position != 0 else np.nan
-        df.at[df.index[i], "pnl_ptc"] = pnl_pct if position != 0 else 0.0
+        df.at[df.index[i], "pnl_pct"] = pnl_pct
 
         if max_trades is not None and trade_count >= max_trades:
             break
@@ -276,7 +274,14 @@ def run_backtest_zscore(
     return df
 
 
-def extract_trades(df, include_last_open_trade=False):
+def extract_trades_pnl(df, get_pct=True, include_last_open_trade=True):
+
+    def get_trade_pnl(entry_value, exit_value):
+        if get_pct:
+            return (exit_value - entry_value) / entry_value
+        else:
+            return exit_value - entry_value
+
     trades = []
 
     prev_pos = 0
@@ -285,20 +290,25 @@ def extract_trades(df, include_last_open_trade=False):
     for i in range(len(df)):
         curr_pos = df["position"].iloc[i]
         curr_equity = df["equity"].iloc[i]
+        # TODO riparti da qui:
+        #     ho creato la colonna "pnl_pct" che rappresenta la percentuale di guadagno/perdita ignorando le commissioni del trade corrente
+        #     usala per calcolare i pnl dei singoli trades in percentuale magari decidendo se togliere una percentuale fissa di commissioni ad ogni trade per penalizzare
+        #     strategie con molti trades
+        commission = df["commission"].iloc[i] / (abs(curr_pos - prev_pos)) # conto le commissioni solo di questo trade (considerando anche il caso di position flip)
 
         # ENTRY
         if prev_pos == 0 and curr_pos != 0:
-            entry_equity = curr_equity
+            entry_equity = curr_equity + commission # la mia equity di entry è quella attuale più le commissioni pagate
 
         # EXIT (pos → 0 OR sign flip)
         elif prev_pos != 0 and (
                 curr_pos == 0 or np.sign(prev_pos) != np.sign(curr_pos)
         ):
-            trades.append(curr_equity - entry_equity)
+            trades.append(get_trade_pnl(entry_equity, curr_equity))
 
             # se flip, nuova entry nello stesso bar
             if curr_pos != 0:
-                entry_equity = curr_equity
+                entry_equity = curr_equity + commission
             else:
                 entry_equity = None
 
@@ -306,7 +316,7 @@ def extract_trades(df, include_last_open_trade=False):
 
     # ultimo trade aperto
     if include_last_open_trade and prev_pos != 0 and entry_equity is not None:
-        trades.append(df["equity"].iloc[-1] - entry_equity)
+        trades.append(get_trade_pnl(entry_equity, df["equity"].iloc[-1]))
 
     return np.array(trades)
 
@@ -339,7 +349,8 @@ def sortino_ratio(returns):
 # METRICHE
 # =========================
 def compute_metrics(df, initial_capital, interval):
-    trades_pnl = extract_trades(df, include_last_open_trade=True)
+    trades_pnl = extract_trades_pnl(df, get_pct=True, include_last_open_trade=True)
+
 
     pnl = df["equity"].iloc[-1] - initial_capital
     max_dd = (df["equity"] / df["equity"].cummax() - 1).min()
