@@ -31,23 +31,24 @@ COMMISSION_VALUE = 0.002  # 0.2% commissioni
 
 VALIDATION_RESULTS_FILE = "validation_results.csv"
 
-def inspect_walk_forward(wf_results):
-    for i, wf in wf_results.iterrows():
-        print(f"\n=== WALK-FORWARD TEST WINDOW {i} when start bar is {wf_results['start_bar'][i]} ===")
 
-        if wf["selected_tables"] is None or len(wf["selected_tables"]) == 0:
-            print("Nessuna tabella selezionata in questa finestra.")
-            continue
-
-        test_bts = wf["test_backtests"]
-        selected_bt = {k: v for k, v in test_bts.items() if k in wf["selected_tables"]}
-        oracle_bt = {k: v for k, v in test_bts.items() if k in wf["oracle_tables"]}
-
-        print("Selected portfolio")
-        browse_portfolio(selected_bt, "SELECTED PORTFOLIO")
-
-        print("Oracle portfolio")
-        browse_portfolio(oracle_bt, "ORACLE PORTFOLIO")
+# def inspect_walk_forward(wf_results):
+#     for i, wf in wf_results.iterrows():
+#         print(f"\n=== WALK-FORWARD TEST WINDOW {i} when start bar is {wf_results['start_bar'][i]} ===")
+#
+#         if wf["selected_tables"] is None or len(wf["selected_tables"]) == 0:
+#             print("Nessuna tabella selezionata in questa finestra.")
+#             continue
+#
+#         test_bts = wf["test_backtests"]
+#         selected_bt = {k: v for k, v in test_bts.items() if k in wf["selected_tables"]}
+#         oracle_bt = {k: v for k, v in test_bts.items() if k in wf["oracle_tables"]}
+#
+#         print("Selected portfolio")
+#         browse_portfolio(selected_bt, "SELECTED PORTFOLIO")
+#
+#         print("Oracle portfolio")
+#         browse_portfolio(oracle_bt, "ORACLE PORTFOLIO")
 
 
 # =========================
@@ -122,10 +123,11 @@ def run_backtest_zscore(
     # =========================
     df["mean"] = df["close"].rolling(rolling_window).mean()
     df["std"] = df["close"].rolling(rolling_window).std()
+    df["price_avg"] = (df["low"] + df["high"]) / 2
 
     df["zscore"] = np.where(
         df["std"] > 0,
-        (df["close"] - df["mean"]) / df["std"],
+        (df["price_avg"] - df["mean"]) / df["std"],
         0.0,
     )
 
@@ -135,6 +137,7 @@ def run_backtest_zscore(
     df["position"] = 0
     df["entry_price"] = np.nan
     df["entry_bar"] = np.nan
+    df["pnl_ptc"] = 0.0
     df["trail_price"] = np.nan
     df["trades"] = 0.0
 
@@ -148,9 +151,13 @@ def run_backtest_zscore(
     # LOOP PRINCIPALE
     # =========================
     for i in range(rolling_window + 1, len(df)):
-        price = df.iloc[i]["close"]
+        # price = df.iloc[i]["close"]
+        max_price = df.iloc[i]["high"]
+        min_price = df.iloc[i]["low"]
+        avg_price = df.iloc[i]["price_avg"]
         z = df.iloc[i]["zscore"]
         mean = df.iloc[i]["mean"]
+        pnl_pct = 0.0
 
         # =====================
         # ENTRY
@@ -158,9 +165,9 @@ def run_backtest_zscore(
         if position == 0:
             if z < -zscore_threshold:
                 position = 1  # Entering LONG
-                entry_price = price
+                entry_price = avg_price
                 entry_bar = i
-                trail_price = price
+                trail_price = avg_price
                 trade_count += 1
 
             elif z > zscore_threshold:
@@ -235,6 +242,7 @@ def run_backtest_zscore(
         df.at[df.index[i], "entry_price"] = entry_price if position != 0 else np.nan
         df.at[df.index[i], "entry_bar"] = entry_bar if position != 0 else np.nan
         df.at[df.index[i], "trail_price"] = trail_price if position != 0 else np.nan
+        df.at[df.index[i], "pnl_ptc"] = pnl_pct if position != 0 else 0.0
 
         if max_trades is not None and trade_count >= max_trades:
             break
@@ -268,7 +276,7 @@ def run_backtest_zscore(
     return df
 
 
-def extract_trades(df):
+def extract_trades(df, include_last_open_trade=False):
     trades = []
 
     prev_pos = 0
@@ -295,6 +303,10 @@ def extract_trades(df):
                 entry_equity = None
 
         prev_pos = curr_pos
+
+    # ultimo trade aperto
+    if include_last_open_trade and prev_pos != 0 and entry_equity is not None:
+        trades.append(df["equity"].iloc[-1] - entry_equity)
 
     return np.array(trades)
 
@@ -327,7 +339,7 @@ def sortino_ratio(returns):
 # METRICHE
 # =========================
 def compute_metrics(df, initial_capital, interval):
-    trades_pnl = extract_trades(df)
+    trades_pnl = extract_trades(df, include_last_open_trade=True)
 
     pnl = df["equity"].iloc[-1] - initial_capital
     max_dd = (df["equity"] / df["equity"].cummax() - 1).min()
@@ -390,7 +402,6 @@ def compute_metrics(df, initial_capital, interval):
         # Sortino buono
         # 👉 stai facendo mean reversion vera, non trend following mascherato.
     }
-
 
 
 def load_validation_results():
@@ -512,11 +523,13 @@ def run_walk_forward(
         validation_bars,
         test_bars,
         top_n,
+        filter_rules,
+        metric_priority_map,
 ):
     tables = [t for t in get_all_tables(db_path) if "1h" in t]
 
     # TODO: limitazione di test
-    # tables = tables[: 20]  # per testare più velocemente
+    tables = tables[: 20]  # per testare più velocemente
     # tables = ["t_1ADS_MI_1h"]
 
     print("Loading data...")
@@ -557,7 +570,7 @@ def run_walk_forward(
             if idx % 50 == 0:
                 print(f"Validating table: {table} ({idx + 1}/{len(valid_tables)})")
 
-            val = df.iloc[start : start + validation_bars]
+            val = df.iloc[start: start + validation_bars]
 
             bt_val = run_backtest_zscore(
                 val,
@@ -585,8 +598,8 @@ def run_walk_forward(
         # =========================
         selected = get_selected_ranked_tickers(
             validation_df=val_df,
-            filter_rules=FILTER_RULES,
-            metric_priority_map=METRIC_PRIORITY_MAP,
+            filter_rules=filter_rules,
+            metric_priority_map=metric_priority_map,
             top_n=top_n,
         )
 
@@ -605,7 +618,7 @@ def run_walk_forward(
             df = data[table]
 
             test = df.iloc[
-                start + validation_bars :
+                start + validation_bars:
                 start + validation_bars + test_bars
             ]
 
@@ -655,18 +668,10 @@ def run_walk_forward(
             "efficiency": eff,
             "selected_tables": selected_tables,
             "oracle_tables": oracle_tables,
-            # "selected_test_history": {
+            # "test_backtests": {
             #     table: bt_test_dict[table]
-            #     for table in selected_tables
+            #     for table in set(selected_tables + oracle_tables)
             # },
-            # "oracle_test_history": {
-            #     table: bt_test_dict[table]
-            #     for table in oracle_tables
-            # },
-            "test_backtests": {
-                table: bt_test_dict[table]
-                for table in set(selected_tables + oracle_tables)
-            },
         })
 
         print(f"******** Selected portfolio PnL: {selected_port['total_pnl']:.2f}")
@@ -682,7 +687,6 @@ def run_walk_forward(
     return pd.DataFrame(wf_results)
 
 
-
 def summarize_walk_forward(wf_df):
     return {
         "periods": len(wf_df),
@@ -695,50 +699,49 @@ def summarize_walk_forward(wf_df):
     }
 
 
+def main():
+    # =========================
+    # WALK-FORWARD PARAMS
+    # =========================
+    VALIDATION_BARS = 252 * 8  # 1 anno ~ hourly
+    TEST_BARS = 21 * 8  # 1 mese ~ hourly
+
+    FILTER_RULES = {
+        "expectancy": {"direction": ">", "threshold": 0},
+        "profit_factor": {"direction": ">", "threshold": 1.2},
+        "max_drawdown": {"direction": ">", "threshold": -0.25},
+        "exposure": {"direction": ">", "threshold": 0.05},
+    }
+
+    METRIC_PRIORITY_MAP = {
+        "expectancy": 3.0,
+        "profit_factor": 2.0,
+        "sharpe": 1.5,
+        "sortino": 1.5,
+    }
+
+    wf_df = run_walk_forward(
+        db_path=DB_PATH,
+        validation_bars=VALIDATION_BARS,
+        test_bars=TEST_BARS,
+        top_n=None,
+        filter_rules=FILTER_RULES,
+        metric_priority_map=METRIC_PRIORITY_MAP,
+    )
+
+    summary = summarize_walk_forward(wf_df)
+
+    print("\n=== WALK-FORWARD SUMMARY ===")
+    for k, v in summary.items():
+        print(f"{k}: {v}")
+
+    WalkForwardInspector(
+        wf_df,
+        zscore_threshold=ZSCORE_THRESHOLD,
+        wf_idx=0
+    )
+    # inspect_walk_forward(wf_df)
 
 
-
-FILTER_RULES = {
-    "expectancy": {"direction": ">", "threshold": 0},
-    "profit_factor": {"direction": ">", "threshold": 1.2},
-    "max_drawdown": {"direction": ">", "threshold": -0.25},
-    "exposure": {"direction": ">", "threshold": 0.05},
-}
-
-METRIC_PRIORITY_MAP = {
-    "expectancy": 3.0,
-    "profit_factor": 2.0,
-    "sharpe": 1.5,
-    "sortino": 1.5,
-}
-
-
-# =========================
-# WALK-FORWARD PARAMS
-# =========================
-VALIDATION_BARS = 252 * 8      # 1 anno ~ hourly
-TEST_BARS = 21 * 8             # 1 mese ~ hourly
-
-
-wf_df = run_walk_forward(
-    db_path=DB_PATH,
-    validation_bars=VALIDATION_BARS,
-    test_bars=TEST_BARS,
-    top_n=None,
-)
-
-summary = summarize_walk_forward(wf_df)
-
-print("\n=== WALK-FORWARD SUMMARY ===")
-for k, v in summary.items():
-    print(f"{k}: {v}")
-
-
-
-WalkForwardInspector(
-    wf_df,
-    zscore_threshold=ZSCORE_THRESHOLD,
-    wf_idx=0
-)
-# inspect_walk_forward(wf_df)
-
+if __name__ == "__main__":
+    main()

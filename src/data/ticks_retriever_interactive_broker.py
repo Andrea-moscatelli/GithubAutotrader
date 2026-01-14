@@ -17,7 +17,7 @@ from pandas import DataFrame
 # CONFIG
 # =========================
 
-DB_NAME = "market_data.db"
+DB_NAME = "market_data_from_IB.db"
 
 ITALIAN_TICKERS_FILE = "Euronext_Equities_2026-01-08.csv"
 VALID_ITALIAN_MARKETS = {
@@ -439,7 +439,6 @@ def main(data_folder: str):
             symbol = row["symbol"]
             market = row["market"]
 
-            # cfg = VALID_MARKETS[market]
 
             try:
                 result = discover_contract(
